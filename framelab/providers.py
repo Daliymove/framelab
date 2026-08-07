@@ -1,0 +1,232 @@
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+from urllib.parse import quote, urlsplit
+
+import httpx
+
+from .config import Settings, public_url
+from .models import GenerationJob, Provider
+
+
+class ProviderError(RuntimeError):
+    pass
+
+
+def _image_endpoint(base_url: str) -> str:
+    base = base_url.strip().rstrip("/")
+    if base.endswith("/images/generations"):
+        return base
+    return f"{base}/images/generations"
+
+
+def _async_endpoint(base_url: str) -> str:
+    return f"{_image_endpoint(base_url)}/async"
+
+
+def _task_endpoint(base_url: str, task_id: str) -> str:
+    generation_endpoint = _image_endpoint(base_url)
+    api_root = generation_endpoint.removesuffix("/images/generations")
+    return f"{api_root}/images/tasks/{quote(task_id, safe='')}"
+
+
+def _clean_payload(value: Any, limit: int = 12000) -> dict[str, Any] | list[Any] | str:
+    """Keep diagnostics useful without persisting huge base64 payloads."""
+    if isinstance(value, dict):
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            if key in {"b64_json", "image_base64", "data"} and isinstance(item, str) and len(item) > 512:
+                cleaned[key] = f"<omitted {len(item)} chars>"
+            else:
+                cleaned[str(key)] = _clean_payload(item, limit)
+        return cleaned
+    if isinstance(value, list):
+        return [_clean_payload(item, limit) for item in value[:20]]
+    if isinstance(value, str):
+        return value[:limit]
+    return value
+
+
+def _parse_error(response: httpx.Response) -> str:
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = response.text
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error)
+        if error:
+            return str(error)
+    return str(payload)[:4000] or f"HTTP {response.status_code}"
+
+
+def _decode_data_url(value: str) -> bytes:
+    _, separator, encoded = value.partition(",")
+    if not separator:
+        raise ProviderError("provider 返回了无效的 data URL。")
+    try:
+        return base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ProviderError("provider 返回了无效的 base64 图片。") from exc
+
+
+@dataclass
+class SubmittedTask:
+    task_id: str
+    response: dict[str, Any]
+
+
+@dataclass
+class ProviderResult:
+    image_bytes: bytes
+    suffix: str
+    response: dict[str, Any]
+
+
+class OpenAIAsyncProvider:
+    """OpenAI-compatible async image provider; deliberately has no retry layer."""
+
+    def __init__(self, provider: Provider, api_key: str, settings: Settings):
+        self.provider = provider
+        self.api_key = api_key
+        self.settings = settings
+
+    @property
+    def base_url(self) -> str:
+        return self.provider.base_url.strip().rstrip("/")
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.api_key}",
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Connection": "close",
+            "User-Agent": "FrameLab/0.1",
+        }
+
+    def submit(self, job: GenerationJob) -> SubmittedTask:
+        payload = {
+            "model": job.model,
+            "prompt": job.prompt,
+            "n": 1,
+            "size": job.size,
+            "quality": job.quality,
+            "response_format": job.response_format,
+        }
+        timeout = max(1.0, min(float(job.timeout_seconds), 1800.0))
+        try:
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                response = client.post(_async_endpoint(self.base_url), headers=self._headers(), json=payload)
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"提交 provider 失败：{exc}") from exc
+        if response.status_code >= 400:
+            raise ProviderError(f"provider 返回 HTTP {response.status_code}：{_parse_error(response)}")
+        try:
+            decoded = response.json()
+        except ValueError as exc:
+            raise ProviderError("provider 提交响应不是有效 JSON。") from exc
+        if not isinstance(decoded, dict):
+            raise ProviderError("provider 提交响应不是对象。")
+        task_id = decoded.get("task_id") or decoded.get("id")
+        if not isinstance(task_id, str) or not task_id:
+            raise ProviderError("provider 提交成功但响应缺少 task_id。")
+        return SubmittedTask(task_id=task_id, response=_clean_payload(decoded))
+
+    def poll_until_done(self, task_id: str, deadline: float, on_poll=None) -> ProviderResult:
+        endpoint = _task_endpoint(self.base_url, task_id)
+        last_response: dict[str, Any] = {}
+        last_poll_error = ""
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                detail = f"；最后一次查询错误：{last_poll_error}" if last_poll_error else ""
+                raise ProviderError(f"任务等待超过设定上限{detail}；task_id={task_id}")
+            # This provider may hold the status request open until generation
+            # advances. Match the original client behavior by allowing the
+            # request to use the job's full remaining wait budget.
+            timeout = max(1.0, remaining)
+            try:
+                with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                    response = client.get(endpoint, headers=self._headers())
+            except httpx.HTTPError as exc:
+                last_poll_error = str(exc)
+                if on_poll:
+                    on_poll("reconnecting", {"error": last_poll_error, "task_id": task_id})
+                time.sleep(min(self.settings.image_poll_interval, max(0.05, remaining)))
+                continue
+            last_poll_error = ""
+            if response.status_code >= 400:
+                raise ProviderError(
+                    f"查询异步任务返回 HTTP {response.status_code}：{_parse_error(response)}；task_id={task_id}"
+                )
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise ProviderError(f"异步任务响应不是有效 JSON；task_id={task_id}") from exc
+            if not isinstance(payload, dict):
+                raise ProviderError(f"异步任务响应不是对象；task_id={task_id}")
+            last_response = _clean_payload(payload)
+            status = str(payload.get("status") or payload.get("state") or "").lower()
+            if on_poll:
+                on_poll(status, last_response)
+            if status in {"succeeded", "success", "completed", "done"}:
+                result = payload.get("result")
+                if not isinstance(result, dict):
+                    result = payload
+                image_bytes, suffix = self._extract_image(result, timeout)
+                return ProviderResult(image_bytes=image_bytes, suffix=suffix, response=last_response)
+            if status in {"failed", "failure", "error", "canceled", "cancelled"}:
+                error = payload.get("error")
+                detail = error.get("message") if isinstance(error, dict) else error
+                raise ProviderError(f"异步任务失败：{detail or 'provider 未提供原因'}；task_id={task_id}")
+            if status not in {"queued", "pending", "running", "processing", "in_progress", ""}:
+                raise ProviderError(f"provider 返回未知任务状态 {status!r}；task_id={task_id}")
+            time.sleep(min(self.settings.image_poll_interval, max(0.05, remaining)))
+
+    def _extract_image(self, payload: dict[str, Any], timeout: float) -> tuple[bytes, str]:
+        data = payload.get("data")
+        if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+            raise ProviderError("provider 成功响应中没有 data[0]。")
+        item = data[0]
+        encoded = item.get("b64_json")
+        if isinstance(encoded, str) and encoded:
+            return _decode_data_url(f"data:image/png;base64,{encoded}"), ".png"
+        url = item.get("url")
+        if isinstance(url, str) and url.startswith("data:"):
+            mime = url.split(";", 1)[0].removeprefix("data:")
+            suffix = {"image/jpeg": ".jpg", "image/webp": ".webp", "image/gif": ".gif"}.get(mime, ".png")
+            return _decode_data_url(url), suffix
+        if not isinstance(url, str) or not url:
+            raise ProviderError("provider 成功响应中没有图片 URL 或 base64。")
+        parsed = urlsplit(url)
+        if parsed.scheme not in {"http", "https"}:
+            raise ProviderError("provider 返回了不支持的图片 URL。")
+        try:
+            with httpx.Client(timeout=max(1.0, timeout), follow_redirects=False) as client:
+                response = client.get(url, headers={"User-Agent": "FrameLab/0.1"})
+        except httpx.HTTPError as exc:
+            raise ProviderError(f"下载 provider 图片失败：{exc}") from exc
+        if response.status_code >= 400:
+            raise ProviderError(f"下载 provider 图片返回 HTTP {response.status_code}。")
+        content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+        suffix = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+            "image/gif": ".gif",
+        }.get(content_type)
+        if suffix is None:
+            path_suffix = Path(parsed.path).suffix.lower()
+            suffix = path_suffix if path_suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif"} else ".png"
+        return response.content, suffix
+
+
+def provider_snapshot(provider: Provider) -> str:
+    return public_url(provider.base_url)

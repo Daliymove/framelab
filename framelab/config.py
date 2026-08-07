@@ -1,0 +1,129 @@
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+from dotenv import load_dotenv
+
+
+PACKAGE_DIR = Path(__file__).resolve().parent
+APP_DIR = PACKAGE_DIR.parent
+
+# Both the API process and the worker import this module, so one project-level
+# file supplies the same configuration to each process. File values win over
+# inherited shell variables to keep local startup deterministic.
+load_dotenv(APP_DIR / ".env", override=True, encoding="utf-8")
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value is not None and value.strip():
+            return value.strip()
+    return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def public_url(value: str) -> str:
+    """Return a URL snapshot without credentials or query parameters."""
+    parsed = urlsplit(value.strip())
+    if not parsed.scheme or not parsed.netloc:
+        return ""
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path.rstrip("/"), "", ""))
+
+
+@dataclass(frozen=True)
+class Settings:
+    host: str
+    port: int
+    data_dir: Path
+    database_path: Path
+    media_dir: Path
+    frontend_dist: Path
+    image_api_key: str
+    image_base_url: str
+    image_provider_id: str
+    image_provider_name: str
+    image_model: str
+    image_poll_interval: float
+    image_max_prompt_chars: int
+    image_max_wait_seconds: int
+    imgbed_base_url: str
+    imgbed_api_token: str
+    imgbed_auth_code: str
+    imgbed_upload_path: str
+    imgbed_upload_channel: str
+    imgbed_upload_channel_name: str
+    imgbed_upload_folder: str
+    imgbed_enabled: bool
+    max_upload_bytes: int
+
+    @classmethod
+    def from_env(cls) -> "Settings":
+        raw_data_dir = _first_env(
+            "FRAMELAB_DATA_DIR",
+            default=str(Path.home() / "Pictures" / "FrameLab"),
+        )
+        data_dir = Path(raw_data_dir).expanduser().resolve()
+        raw_db = _first_env("FRAMELAB_DB_PATH", default=str(data_dir / "framelab.sqlite3"))
+        image_base_url = _first_env("CODEX_IMAGE_BASE_URL")
+        imgbed_base_url = _first_env(
+            "FRAMELAB_IMGBED_BASE_URL",
+            "CLOUDFLARE_IMGBED_BASE_URL",
+            "IMGBED_BASE_URL",
+        )
+        return cls(
+            host=_first_env("FRAMELAB_HOST", default="127.0.0.1"),
+            port=int(_first_env("FRAMELAB_PORT", default="8765")),
+            data_dir=data_dir,
+            database_path=Path(raw_db).expanduser().resolve(),
+            media_dir=data_dir / "media",
+            frontend_dist=APP_DIR / "web" / "dist",
+            image_api_key=_first_env("CODEX_IMAGE_API_KEY"),
+            image_base_url=image_base_url,
+            image_provider_id=_first_env("CODEX_IMAGE_PROVIDER_ID", default="codex-relay"),
+            image_provider_name=_first_env("CODEX_IMAGE_PROVIDER_NAME", default="Image Relay"),
+            image_model=_first_env("CODEX_IMAGE_DEFAULT_MODEL", default="gpt-image-2"),
+            image_poll_interval=float(_first_env("CODEX_IMAGE_POLL_INTERVAL", default="3")),
+            image_max_prompt_chars=int(_first_env("CODEX_IMAGE_MAX_PROMPT_CHARS", default="32000")),
+            image_max_wait_seconds=int(_first_env("CODEX_IMAGE_MAX_WAIT_SECONDS", default="1800")),
+            imgbed_base_url=imgbed_base_url,
+            imgbed_api_token=_first_env(
+                "FRAMELAB_IMGBED_API_TOKEN",
+                "CLOUDFLARE_IMGBED_API_TOKEN",
+                "IMGBED_API_TOKEN",
+            ),
+            imgbed_auth_code=_first_env("FRAMELAB_IMGBED_AUTH_CODE", "IMGBED_AUTH_CODE"),
+            imgbed_upload_path=_first_env("FRAMELAB_IMGBED_UPLOAD_PATH", default="/upload"),
+            imgbed_upload_channel=_first_env("FRAMELAB_IMGBED_UPLOAD_CHANNEL"),
+            imgbed_upload_channel_name=_first_env("FRAMELAB_IMGBED_UPLOAD_CHANNEL_NAME"),
+            imgbed_upload_folder=_first_env("FRAMELAB_IMGBED_UPLOAD_FOLDER"),
+            imgbed_enabled=_env_bool("FRAMELAB_IMGBED_ENABLED", bool(imgbed_base_url)),
+            max_upload_bytes=int(_first_env("FRAMELAB_MAX_UPLOAD_BYTES", default=str(50 * 1024 * 1024))),
+        )
+
+    @property
+    def image_base_url_public(self) -> str:
+        return public_url(self.image_base_url)
+
+    @property
+    def imgbed_base_url_public(self) -> str:
+        return public_url(self.imgbed_base_url)
+
+    @property
+    def ready_for_generation(self) -> bool:
+        return bool(self.image_api_key and self.image_base_url)
+
+    def ensure_directories(self) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        self.media_dir.mkdir(parents=True, exist_ok=True)
+        (self.media_dir / "originals").mkdir(parents=True, exist_ok=True)
+        (self.media_dir / "derived").mkdir(parents=True, exist_ok=True)
