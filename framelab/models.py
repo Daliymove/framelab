@@ -77,6 +77,9 @@ class GenerationJob(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
     parent_job_id: Mapped[str | None] = mapped_column(ForeignKey("generation_jobs.id"), nullable=True, index=True)
     asset_id: Mapped[str | None] = mapped_column(ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True)
+    reference_asset_id: Mapped[str | None] = mapped_column(
+        ForeignKey("assets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     provider_id: Mapped[str] = mapped_column(String(100), nullable=False)
     provider_name_snapshot: Mapped[str] = mapped_column(String(200), nullable=False)
     provider_url_snapshot: Mapped[str] = mapped_column(Text, nullable=False, default="")

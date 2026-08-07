@@ -38,7 +38,9 @@ def make_session_factory(settings: Settings):
 def init_db(session_factory, settings: Settings) -> None:
     settings.ensure_directories()
     engine = session_factory.kw["bind"]
+    _ensure_generation_job_reference_column(engine)
     Base.metadata.create_all(engine)
+    _ensure_generation_job_reference_column(engine)
     with session_factory() as session:
         provider = session.get(Provider, settings.image_provider_id)
         if provider is None:
@@ -62,6 +64,25 @@ def init_db(session_factory, settings: Settings) -> None:
             if changed:
                 provider.updated_at = utcnow()
         session.commit()
+
+
+def _ensure_generation_job_reference_column(engine) -> None:
+    """Add the reference-image field to libraries created before this feature."""
+    with engine.begin() as connection:
+        columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(generation_jobs)").fetchall()
+        }
+        if not columns:
+            return
+        if "reference_asset_id" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE generation_jobs ADD COLUMN reference_asset_id VARCHAR(36)"
+            )
+        connection.exec_driver_sql(
+            "CREATE INDEX IF NOT EXISTS ix_generation_jobs_reference_asset_id "
+            "ON generation_jobs (reference_asset_id)"
+        )
 
 
 @contextmanager

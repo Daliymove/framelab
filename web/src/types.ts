@@ -69,6 +69,13 @@ export interface Job {
   id: string;
   parent_job_id: string | null;
   asset_id: string | null;
+  reference_asset_id: string | null;
+  reference_asset?: {
+    id: string;
+    filename: string;
+    original_filename: string;
+    thumbnail_url: string;
+  };
   provider_id: string;
   provider_name: string;
   provider_url: string;
@@ -100,6 +107,7 @@ export interface Config {
   provider: { id: string; name: string; base_url: string };
   imgbed: { enabled: boolean; configured: boolean; base_url: string };
   data_dir: string;
+  media_dir: string;
   database_path: string;
   asset_count: number;
   pending_sync_count: number;

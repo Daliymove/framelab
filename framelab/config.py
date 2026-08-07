@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
@@ -10,11 +12,48 @@ from dotenv import load_dotenv
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 APP_DIR = PACKAGE_DIR.parent
+ENV_FILE = APP_DIR / ".env"
 
 # Both the API process and the worker import this module, so one project-level
 # file supplies the same configuration to each process. File values win over
 # inherited shell variables to keep local startup deterministic.
 load_dotenv(APP_DIR / ".env", override=True, encoding="utf-8")
+
+
+def persist_media_dir(media_dir: Path, env_path: Path | None = None) -> None:
+    """Persist the image directory while preserving the rest of the env file."""
+    value = str(media_dir)
+    if any(char in value for char in "\x00\r\n"):
+        raise ValueError("图片目录不能包含换行或无效字符。")
+
+    env_path = env_path or ENV_FILE
+    existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
+    lines = existing.splitlines()
+    pattern = re.compile(r"^\s*(?:#\s*)?FRAMELAB_MEDIA_DIR\s*=")
+    replaced = False
+    for index, line in enumerate(lines):
+        if pattern.match(line):
+            lines[index] = f"FRAMELAB_MEDIA_DIR={value}"
+            replaced = True
+            break
+
+    if replaced:
+        content = "\n".join(lines)
+        if existing.endswith(("\n", "\r")):
+            content += "\n"
+    else:
+        separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
+        content = f"{existing}{separator}FRAMELAB_MEDIA_DIR={value}\n"
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(prefix=f".{env_path.name}.", suffix=".tmp", dir=env_path.parent)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="") as temporary:
+            temporary.write(content)
+        os.replace(temporary_name, env_path)
+    finally:
+        if os.path.exists(temporary_name):
+            os.unlink(temporary_name)
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -74,6 +113,7 @@ class Settings:
         )
         data_dir = Path(raw_data_dir).expanduser().resolve()
         raw_db = _first_env("FRAMELAB_DB_PATH", default=str(data_dir / "framelab.sqlite3"))
+        raw_media_dir = _first_env("FRAMELAB_MEDIA_DIR", default=str(data_dir / "media"))
         image_base_url = _first_env("CODEX_IMAGE_BASE_URL")
         imgbed_base_url = _first_env(
             "FRAMELAB_IMGBED_BASE_URL",
@@ -85,7 +125,7 @@ class Settings:
             port=int(_first_env("FRAMELAB_PORT", default="8765")),
             data_dir=data_dir,
             database_path=Path(raw_db).expanduser().resolve(),
-            media_dir=data_dir / "media",
+            media_dir=Path(raw_media_dir).expanduser().resolve(),
             frontend_dist=APP_DIR / "web" / "dist",
             image_api_key=_first_env("CODEX_IMAGE_API_KEY"),
             image_base_url=image_base_url,

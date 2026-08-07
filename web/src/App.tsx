@@ -16,6 +16,7 @@ import {
   ExternalLink,
   FileImage,
   Filter,
+  FolderOpen,
   ImagePlus,
   Images,
   Info,
@@ -35,6 +36,7 @@ import {
   Square,
   Tag as TagIcon,
   Timer,
+  Trash2,
   Upload,
   WandSparkles,
   X,
@@ -43,6 +45,7 @@ import {
   bulkSync,
   bulkTags,
   createJob,
+  deleteAsset,
   getAsset,
   getAssets,
   getConfig,
@@ -55,6 +58,7 @@ import {
   startWorker,
   stopWorker,
   syncAsset,
+  updateMediaDir,
   updateAsset,
   uploadAsset,
 } from "./api";
@@ -209,6 +213,23 @@ function AssetDrawer({ assetId, onClose, onChanged, setNotice }: { assetId: stri
     },
   });
   const asset = detail.data;
+  const remove = useMutation({
+    mutationFn: () => deleteAsset(assetId),
+    onSuccess: () => {
+      queryClient.removeQueries({ queryKey: ["asset", assetId] });
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      setNotice("图片已从图库删除");
+      onChanged();
+      onClose();
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "删除图片失败"),
+  });
+  const handleDelete = () => {
+    if (!asset || remove.isPending) return;
+    const name = asset.title || asset.original_filename;
+    if (window.confirm(`确定删除“${name}”？图片将从图库中移除。`)) remove.mutate();
+  };
 
   return (
     <div className="drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
@@ -224,6 +245,7 @@ function AssetDrawer({ assetId, onClose, onChanged, setNotice }: { assetId: stri
           <div className="drawer-actions">
             <a className="button quiet" href={asset.original_url} download={asset.filename}><Download size={15} />下载原图</a>
             {asset.remote.url ? <a className="button quiet" href={asset.remote.url} target="_blank" rel="noreferrer"><ExternalLink size={15} />打开图床</a> : <button type="button" className="button quiet" onClick={() => sync.mutate()} disabled={sync.isPending}><CloudUpload size={15} />{sync.isPending ? "排队中" : "同步图床"}</button>}
+            <button type="button" className="button danger" onClick={handleDelete} disabled={remove.isPending}><Trash2 size={15} />{remove.isPending ? "删除中" : "删除图片"}</button>
           </div>
           <section className="drawer-section">
             <div className="section-label"><Pencil size={14} />整理信息</div>
@@ -254,6 +276,7 @@ function AssetDrawer({ assetId, onClose, onChanged, setNotice }: { assetId: stri
               <span>耗时<strong>{formatDuration(asset.generation.elapsed_ms)}</strong></span>
               <span>Task ID<strong className="mono">{asset.generation.upstream_task_id || "-"}</strong></span>
             </div>
+            {asset.generation.reference_asset ? <div className="reference-trace"><img src={asset.generation.reference_asset.thumbnail_url} alt="参考图" /><div><span>参考图</span><strong>{asset.generation.reference_asset.original_filename}</strong></div></div> : null}
             <div className="prompt-quote"><span>原始 prompt</span><p>{asset.generation.prompt}</p></div>
             {asset.generation.parent_job_id ? <p className="parent-link"><ChevronRight size={14} />派生自任务 <code>{asset.generation.parent_job_id.slice(0, 8)}</code></p> : null}
             {asset.generation.events?.length ? <div className="event-list">{asset.generation.events.slice(-6).map((event) => <div key={event.id}><i /><span>{event.message}</span><time>{formatDate(event.created_at)}</time></div>)}</div> : null}
@@ -264,8 +287,51 @@ function AssetDrawer({ assetId, onClose, onChanged, setNotice }: { assetId: stri
   );
 }
 
-function SettingsDrawer({ config, providers, onClose }: { config?: Config; providers: Provider[]; onClose: () => void }) {
-  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><aside className="settings-drawer"><div className="drawer-head"><div><p className="kicker">LOCAL CONFIGURATION</p><h2>运行设置</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button></div><section className="settings-block"><div className="section-label"><Database size={14} />本地数据</div><dl className="settings-list"><div><dt>访问范围</dt><dd><span className="status-text succeeded"><CheckCircle2 size={13} />仅当前电脑</span></dd></div><div><dt>数据目录</dt><dd className="mono break">{config?.data_dir || "读取中"}</dd></div><div><dt>数据库</dt><dd className="mono break">{config?.database_path || "读取中"}</dd></div></dl></section><section className="settings-block"><div className="section-label"><WandSparkles size={14} />生图 Provider</div><div className="provider-list">{providers.map((provider) => <div key={provider.id}><span className={provider.ready ? "provider-dot ready" : "provider-dot"} /><div><strong>{provider.name}</strong><small className="mono">{provider.base_url || "未配置 Base URL"}</small></div><em>{provider.ready ? "READY" : "BLOCKED"}</em></div>)}</div></section><section className="settings-block"><div className="section-label"><CloudUpload size={14} />CloudFlare-ImgBed</div><dl className="settings-list"><div><dt>状态</dt><dd><span className={`status-text ${config?.imgbed.configured ? "succeeded" : "disabled"}`}>{config?.imgbed.configured ? <CheckCircle2 size={13} /> : <CircleDot size={13} />}{config?.imgbed.configured ? "已配置" : "未配置"}</span></dd></div><div><dt>REST 地址</dt><dd className="mono break">{config?.imgbed.base_url || "-"}</dd></div><div><dt>重试策略</dt><dd>仅手动重新同步</dd></div></dl></section><p className="settings-foot">密钥只由本机后端读取，不会发送到浏览器。</p></aside></div>;
+function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Config; providers: Provider[]; onClose: () => void; setNotice: (value: string) => void }) {
+  const queryClient = useQueryClient();
+  const [mediaDir, setMediaDir] = useState(config?.media_dir || "");
+  const saveMediaDir = useMutation({
+    mutationFn: () => updateMediaDir(mediaDir),
+    onSuccess: (result) => {
+      setMediaDir(result.media_dir);
+      setNotice(result.message);
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "无法更新图片目录"),
+  });
+
+  useEffect(() => {
+    if (config?.media_dir) setMediaDir(config.media_dir);
+  }, [config?.media_dir]);
+
+  return (
+    <div className="drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+      <aside className="settings-drawer">
+        <div className="drawer-head">
+          <div><p className="kicker">LOCAL CONFIGURATION</p><h2>运行设置</h2></div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+        </div>
+        <section className="settings-block storage-settings-block">
+          <div className="section-label"><Database size={14} />本地数据</div>
+          <dl className="settings-list">
+            <div><dt>访问范围</dt><dd><span className="status-text succeeded"><CheckCircle2 size={13} />仅当前电脑</span></dd></div>
+            <div><dt>数据目录</dt><dd className="mono break">{config?.data_dir || "读取中"}</dd></div>
+            <div><dt>数据库</dt><dd className="mono break">{config?.database_path || "读取中"}</dd></div>
+          </dl>
+          <label className="input-label storage-path-label">
+            图片存储目录
+            <div className="storage-path-control"><FolderOpen size={15} /><input value={mediaDir} onChange={(event) => setMediaDir(event.target.value)} placeholder="输入绝对路径" /></div>
+          </label>
+          <p className="settings-help">保存后会迁移原图和缩略图，数据库位置不变。迁移前请先停止 worker。</p>
+          <button type="button" className="button primary full" onClick={() => saveMediaDir.mutate()} disabled={saveMediaDir.isPending || !mediaDir.trim()}><FolderOpen size={15} />{saveMediaDir.isPending ? "迁移中" : "保存图片路径"}</button>
+          {saveMediaDir.error ? <div className="inline-error"><AlertTriangle size={15} />{saveMediaDir.error instanceof Error ? saveMediaDir.error.message : "无法更新图片目录"}</div> : null}
+        </section>
+        <section className="settings-block"><div className="section-label"><WandSparkles size={14} />生图 Provider</div><div className="provider-list">{providers.map((provider) => <div key={provider.id}><span className={provider.ready ? "provider-dot ready" : "provider-dot"} /><div><strong>{provider.name}</strong><small className="mono">{provider.base_url || "未配置 Base URL"}</small></div><em>{provider.ready ? "READY" : "BLOCKED"}</em></div>)}</div></section>
+        <section className="settings-block"><div className="section-label"><CloudUpload size={14} />CloudFlare-ImgBed</div><dl className="settings-list"><div><dt>状态</dt><dd><span className={`status-text ${config?.imgbed.configured ? "succeeded" : "disabled"}`}>{config?.imgbed.configured ? <CheckCircle2 size={13} /> : <CircleDot size={13} />}{config?.imgbed.configured ? "已配置" : "未配置"}</span></dd></div><div><dt>REST 地址</dt><dd className="mono break">{config?.imgbed.base_url || "-"}</dd></div><div><dt>重试策略</dt><dd>仅手动重新同步</dd></div></dl></section>
+        <p className="settings-foot">密钥只由本机后端读取，不会发送到浏览器。</p>
+      </aside>
+    </div>
+  );
 }
 
 function RuntimeView({ runtime, setNotice }: { runtime?: RuntimeStatus; setNotice: (value: string) => void }) {
@@ -312,7 +378,7 @@ function GalleryView({ assets, filters, setFilters, selected, setSelected, onOpe
 }
 
 function GenerateView({ config, providers, onCreated, setNotice }: { config?: Config; providers: Provider[]; onCreated: () => void; setNotice: (value: string) => void }) {
-  const [prompt, setPrompt] = useState("Create a polished editorial image with a clear subject, expressive composition, and refined contemporary color direction. Keep the image clean, intentional, and free of logos or watermarks.");
+  const [prompt, setPrompt] = useState("把参考图美化成一张更精致的作品，保留主体和核心构图，优化光线、材质、色彩与细节，画面干净，无 logo 和水印。");
   const [model, setModel] = useState("gpt-image-2");
   const [size, setSize] = useState("auto");
   const [quality, setQuality] = useState("high");
@@ -320,12 +386,72 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
   const [providerId, setProviderId] = useState("");
   const [syncEnabled, setSyncEnabled] = useState(true);
   const [parentJobId, setParentJobId] = useState("");
-  const mutation = useMutation({ mutationFn: () => createJob({ prompt, model, size, quality, timeout, provider_id: providerId || undefined, parent_job_id: parentJobId || undefined, sync_enabled: syncEnabled }), onSuccess: (job) => { setNotice(`任务 ${job.id.slice(0, 8)} 已加入队列`); onCreated(); } });
+  const [referenceAsset, setReferenceAsset] = useState<Asset | null>(null);
+  const referenceFileInput = useRef<HTMLInputElement>(null);
+  const queryClient = useQueryClient();
+  const referenceUpload = useMutation({
+    mutationFn: (file: File) => uploadAsset(file, { title: "参考图", notes: "", tags: "参考图", sync_enabled: false }),
+    onSuccess: (result) => {
+      setReferenceAsset(result.asset);
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      setNotice(result.created ? "参考图已上传并加入图库" : "已使用图库中的同一张图片作为参考图");
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "参考图上传失败"),
+  });
+  const mutation = useMutation({
+    mutationFn: () => createJob({ prompt, model, size, quality, timeout, provider_id: providerId || undefined, parent_job_id: parentJobId || undefined, reference_asset_id: referenceAsset?.id || undefined, sync_enabled: syncEnabled }),
+    onSuccess: (job) => { setNotice(`任务 ${job.id.slice(0, 8)} 已加入队列`); onCreated(); },
+  });
   const chosenProvider = providers.find((item) => item.id === (providerId || config?.provider.id));
-  const submit = (event: React.FormEvent) => { event.preventDefault(); if (!prompt.trim()) return; if (timeout < 30 || timeout > 1800) { setNotice("最长等待必须在 30 到 1800 秒之间"); return; } mutation.mutate(); };
-  return <div className="view-stack generate-view"><div className="view-heading"><div><p className="kicker">GENERATION DESK</p><h1>开始创作</h1><p className="view-subtitle">异步提交，后台持续执行；每个参数都会成为回溯记录。</p></div><div className={`ready-badge ${config?.ready ? "ready" : "blocked"}`}><span />{config?.ready ? "Provider ready" : "等待配置"}</div></div>
-    {!config?.ready ? <div className="notice-card warning"><AlertTriangle size={18} /><div><strong>生图 provider 尚未准备好</strong><p>请在项目根目录的 .env 中配置 CODEX_IMAGE_API_KEY 和 CODEX_IMAGE_BASE_URL，然后重启服务。</p></div></div> : null}
-    <form className="generation-layout" onSubmit={submit}><section className="generation-form panel"><div className="panel-heading"><span className="panel-number">01</span><div><p className="kicker">PROMPT</p><h2>创作指令</h2></div><span className="panel-mark"><WandSparkles size={17} /></span></div><label className="input-label large">Prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={32000} rows={15} placeholder="描述你想创作的画面..." /><span className="field-foot"><span>{prompt.length.toLocaleString()} / 32,000</span><span>原文将永久保留</span></span></label><label className="input-label">父任务 ID <div className="input-with-icon"><Copy size={15} /><input value={parentJobId} onChange={(event) => setParentJobId(event.target.value)} placeholder="可选：从历史任务继续生成" /></div></label><div className="form-footer"><label className="toggle-row"><input type="checkbox" checked={syncEnabled} onChange={(event) => setSyncEnabled(event.target.checked)} /><span className="toggle-visual" /><span>完成后自动同步到 cloudflare-imgbed</span></label><button type="submit" className="button primary submit-button" disabled={mutation.isPending || !config?.ready}><WandSparkles size={17} />{mutation.isPending ? "已提交，等待响应" : "加入生成队列"}<ArrowUpRight size={16} /></button></div>{mutation.error ? <div className="inline-error"><AlertTriangle size={15} />{mutation.error.message}</div> : null}</section><aside className="generation-options panel"><div className="panel-heading compact"><span className="panel-number">02</span><div><p className="kicker">REQUEST SNAPSHOT</p><h2>请求参数</h2></div></div><label className="input-label">Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.ready ? " · ready" : " · 未配置"}</option>)}</select></label><div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<select value={size} onChange={(event) => setSize(event.target.value)}><option value="auto">Auto</option><option value="1024x1024">1024 × 1024</option><option value="1536x864">1536 × 864</option><option value="864x1536">864 × 1536</option></select></label></div><fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset><label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label><div className="request-summary"><div><span>调用方式</span><strong><span className="status-live" />ASYNC JOB</strong></div><div><span>Provider</span><strong>{chosenProvider?.base_url || "未配置"}</strong></div><div><span>自动重试</span><strong>0 次</strong></div></div></aside></form></div>;
+  const handleReferenceFile = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (file) referenceUpload.mutate(file);
+    event.target.value = "";
+  };
+  const removeReference = () => {
+    setReferenceAsset(null);
+    if (referenceFileInput.current) referenceFileInput.current.value = "";
+  };
+  const submit = (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!prompt.trim()) return;
+    if (referenceUpload.isPending) { setNotice("参考图仍在上传，请稍候"); return; }
+    if (timeout < 30 || timeout > 1800) { setNotice("最长等待必须在 30 到 1800 秒之间"); return; }
+    mutation.mutate();
+  };
+  return (
+    <div className="view-stack generate-view">
+      <div className="view-heading"><div><p className="kicker">GENERATION DESK</p><h1>开始创作</h1><p className="view-subtitle">上传参考图，再用 prompt 修改、优化或重绘；每个参数都会成为回溯记录。</p></div><div className={`ready-badge ${config?.ready ? "ready" : "blocked"}`}><span />{config?.ready ? "Provider ready" : "等待配置"}</div></div>
+      {!config?.ready ? <div className="notice-card warning"><AlertTriangle size={18} /><div><strong>生图 provider 尚未准备好</strong><p>请在项目根目录的 .env 中配置 CODEX_IMAGE_API_KEY 和 CODEX_IMAGE_BASE_URL，然后重启服务。</p></div></div> : null}
+      <form className="generation-layout" onSubmit={submit}>
+        <section className="generation-form panel">
+          <div className="panel-heading"><span className="panel-number">01</span><div><p className="kicker">PROMPT + REFERENCE</p><h2>创作指令</h2></div><span className="panel-mark"><WandSparkles size={17} /></span></div>
+          <section className="reference-image-section">
+            <div className="reference-section-head">
+              <div><div className="section-label"><ImagePlus size={14} />参考图 <em>可选</em></div><p className="reference-copy">有参考图时会调用 edits 接口；没有参考图则按纯 prompt 生图。</p></div>
+              <input ref={referenceFileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={handleReferenceFile} />
+              <button type="button" className="button small quiet" onClick={() => referenceFileInput.current?.click()} disabled={referenceUpload.isPending}><Upload size={14} />{referenceUpload.isPending ? "上传中" : referenceAsset ? "更换参考图" : "上传参考图"}</button>
+            </div>
+            {referenceAsset ? <div className="reference-preview"><img src={referenceAsset.preview_url} alt={referenceAsset.title || referenceAsset.original_filename} /><div className="reference-meta"><strong>{referenceAsset.original_filename}</strong><span>{referenceAsset.width && referenceAsset.height ? `${referenceAsset.width} × ${referenceAsset.height}` : "图片"} · 任务提交时按原图发送</span><button type="button" className="text-button" onClick={removeReference}><X size={13} />移除参考图</button></div></div> : <button type="button" className="reference-dropzone" onClick={() => referenceFileInput.current?.click()}><ImagePlus size={24} /><strong>选择一张参考图</strong><span>PNG、JPEG、WebP 或 GIF，异步改图请求上限 15 MB</span></button>}
+            {referenceUpload.error ? <div className="inline-error"><AlertTriangle size={15} />{referenceUpload.error instanceof Error ? referenceUpload.error.message : "参考图上传失败"}</div> : null}
+          </section>
+          <label className="input-label large">Prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={32000} rows={15} placeholder="描述你希望如何修改参考图..." /><span className="field-foot"><span>{prompt.length.toLocaleString()} / 32,000</span><span>原文将永久保留</span></span></label>
+          <label className="input-label">父任务 ID <div className="input-with-icon"><Copy size={15} /><input value={parentJobId} onChange={(event) => setParentJobId(event.target.value)} placeholder="可选：从历史任务继续生成" /></div></label>
+          <div className="form-footer"><label className="toggle-row"><input type="checkbox" checked={syncEnabled} onChange={(event) => setSyncEnabled(event.target.checked)} /><span className="toggle-visual" /><span>完成后自动同步到 cloudflare-imgbed</span></label><button type="submit" className="button primary submit-button" disabled={mutation.isPending || referenceUpload.isPending || !config?.ready}><WandSparkles size={17} />{mutation.isPending ? "已提交，等待响应" : referenceAsset ? "提交参考图修改" : "加入生成队列"}<ArrowUpRight size={16} /></button></div>
+          {mutation.error ? <div className="inline-error"><AlertTriangle size={15} />{mutation.error.message}</div> : null}
+        </section>
+        <aside className="generation-options panel">
+          <div className="panel-heading compact"><span className="panel-number">02</span><div><p className="kicker">REQUEST SNAPSHOT</p><h2>请求参数</h2></div></div>
+          <label className="input-label">Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.ready ? " · ready" : " · 未配置"}</option>)}</select></label>
+          <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<select value={size} onChange={(event) => setSize(event.target.value)}><option value="auto">Auto</option><option value="1024x1024">1024 × 1024</option><option value="1536x864">1536 × 864</option><option value="864x1536">864 × 1536</option><option value="2048x2048">2048 × 2048</option><option value="2560x1440">2560 × 1440</option><option value="1440x2560">1440 × 2560</option><option value="3840x2160">3840 × 2160</option><option value="2160x3840">2160 × 3840</option><option value="2880x2880">2880 × 2880</option></select></label></div>
+          <fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset>
+          <label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label>
+          <div className="request-summary"><div><span>调用方式</span><strong><span className="status-live" />{referenceAsset ? "ASYNC EDIT" : "ASYNC JOB"}</strong></div><div><span>Provider</span><strong>{chosenProvider?.base_url || "未配置"}</strong></div><div><span>参考图</span><strong>{referenceAsset ? "1 张 · image[]" : "未选择"}</strong></div><div><span>自动重试</span><strong>0 次</strong></div></div>
+        </aside>
+      </form>
+    </div>
+  );
 }
 
 function JobsView({ jobs, onOpenAsset, setNotice }: { jobs: Job[]; onOpenAsset: (id: string) => void; setNotice: (value: string) => void }) {
@@ -333,7 +459,7 @@ function JobsView({ jobs, onOpenAsset, setNotice }: { jobs: Job[]; onOpenAsset: 
   const retry = useMutation({ mutationFn: (id: string) => retryJob(id), onSuccess: (job) => { setNotice(`已创建手动重试任务 ${job.id.slice(0, 8)}`); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); } });
   const active = jobs.filter((job) => !["succeeded", "failed", "canceled"].includes(job.status));
   const failed = jobs.filter((job) => job.status === "failed");
-  return <div className="view-stack"><div className="view-heading"><div><p className="kicker">JOB CONTROL</p><h1>任务中心</h1><p className="view-subtitle">后台任务不会因为关闭浏览器而停止。</p></div><div className="job-summary"><span><i className="blue-dot" />{active.length} 处理中</span><span><i className="red-dot" />{failed.length} 失败</span></div></div><div className="job-list">{jobs.length ? jobs.map((job) => <article className={`job-row ${job.status}`} key={job.id}><div className="job-status"><StatusIcon status={job.status} /><span>{statusLabel(job.status)}</span></div><div className="job-main"><div className="job-title"><strong>{job.prompt.slice(0, 140)}</strong><span className="mono">{job.id.slice(0, 8)}</span></div><p>{job.progress_message}</p><div className="job-meta"><span><WandSparkles size={13} />{job.provider_name}</span><span><Timer size={13} />{formatDuration(job.elapsed_ms)}</span><span>{job.model}</span><span>{formatDate(job.created_at)}</span></div></div><div className="job-actions">{job.asset_id ? <button type="button" className="button small quiet" onClick={() => onOpenAsset(job.asset_id!)}><FileImage size={14} />查看图片</button> : null}{job.status === "failed" ? <button type="button" className="button small quiet" onClick={() => retry.mutate(job.id)} disabled={retry.isPending}><RefreshCw size={14} />手动重试</button> : null}</div></article>) : <div className="empty-panel"><ListTodo size={30} /><strong>还没有生成任务</strong><span>去“开始创作”提交第一条 prompt。</span></div>}</div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><p className="kicker">JOB CONTROL</p><h1>任务中心</h1><p className="view-subtitle">后台任务不会因为关闭浏览器而停止。</p></div><div className="job-summary"><span><i className="blue-dot" />{active.length} 处理中</span><span><i className="red-dot" />{failed.length} 失败</span></div></div><div className="job-list">{jobs.length ? jobs.map((job) => <article className={`job-row ${job.status}`} key={job.id}><div className="job-status"><StatusIcon status={job.status} /><span>{statusLabel(job.status)}</span></div><div className="job-main"><div className="job-title"><strong>{job.prompt.slice(0, 140)}</strong><span className="mono">{job.id.slice(0, 8)}</span></div><p>{job.progress_message}</p><div className="job-meta"><span><WandSparkles size={13} />{job.provider_name}</span><span><Timer size={13} />{formatDuration(job.elapsed_ms)}</span><span>{job.model}</span>{job.reference_asset_id ? <span><ImagePlus size={13} />参考图</span> : null}<span>{formatDate(job.created_at)}</span></div></div><div className="job-actions">{job.asset_id ? <button type="button" className="button small quiet" onClick={() => onOpenAsset(job.asset_id!)}><FileImage size={14} />查看图片</button> : null}{job.status === "failed" ? <button type="button" className="button small quiet" onClick={() => retry.mutate(job.id)} disabled={retry.isPending}><RefreshCw size={14} />手动重试</button> : null}</div></article>) : <div className="empty-panel"><ListTodo size={30} /><strong>还没有生成任务</strong><span>去“开始创作”提交第一条 prompt。</span></div>}</div></div>;
 }
 
 export default function App() {
@@ -366,5 +492,5 @@ export default function App() {
   const openUpload = () => fileInput.current?.click();
   const handleFile = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) upload.mutate(file); event.target.value = ""; };
   const statData: Stats = stats.data || { assets: 0, generated: 0, uploaded: 0, active_jobs: 0, failed_jobs: 0, synced: 0 };
-  return <div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-icon"><Sparkles size={19} /><span /></div><div><strong>FrameLab</strong><small>PERSONAL AI ARCHIVE</small></div></div><nav className="main-nav"><NavButton active={view === "gallery"} icon={<LayoutGrid size={16} />} label="图库" onClick={() => chooseView("gallery")} count={statData.assets} /><NavButton active={view === "generate"} icon={<WandSparkles size={16} />} label="开始创作" onClick={() => chooseView("generate")} /><NavButton active={view === "jobs"} icon={<ListTodo size={16} />} label="任务中心" onClick={() => chooseView("jobs")} count={activeJobCount} /><NavButton active={view === "runtime"} icon={<Activity size={16} />} label="运行状态" onClick={() => chooseView("runtime")} /></nav><div className="top-actions"><span className={`connection-pill ${config.data?.ready ? "ready" : ""}`}><i />{config.data?.ready ? "API READY" : "需要配置"}</span><button type="button" className="icon-button" title="设置" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></button></div></header><main className="main-content"><section className="command-bar"><div><span className="command-line"><span className="live-pulse" />LOCAL SESSION / TRACEABLE BY DEFAULT</span><p>你的创作记录，终于有一个能回去找的地方。</p></div><div className="command-stats"><span><b>{statData.generated}</b> 生成</span><span><b>{statData.uploaded}</b> 上传</span><span><b>{statData.synced}</b> 已同步</span></div></section>{view === "gallery" ? <GalleryView assets={assets.data?.items || []} filters={filters} setFilters={setFilters} selected={selected} setSelected={setSelected} onOpen={setSelectedAssetId} onUpload={openUpload} onGenerate={() => chooseView("generate")} setNotice={setNotice} /> : null}{view === "generate" ? <GenerateView config={config.data} providers={providers.data || []} onCreated={() => { setView("jobs"); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }} setNotice={setNotice} /> : null}{view === "jobs" ? <JobsView jobs={jobs.data || []} onOpenAsset={(id) => setSelectedAssetId(id)} setNotice={setNotice} /> : null}{view === "runtime" ? <RuntimeView runtime={runtime.data} setNotice={setNotice} /> : null}</main><footer><span>FRAMELAB / LOCAL ONLY</span><span>ORIGINALS STAY ON THIS MACHINE</span><span className="footer-path">{config.data?.data_dir || "数据目录读取中"}</span></footer><input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={handleFile} />{selectedAssetId ? <AssetDrawer assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} onChanged={() => { queryClient.invalidateQueries({ queryKey: ["assets"] }); }} setNotice={setNotice} /> : null}{settingsOpen ? <SettingsDrawer config={config.data} providers={providers.data || []} onClose={() => setSettingsOpen(false)} /> : null}{notice ? <div className="toast"><Info size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice("")} aria-label="关闭提示"><X size={14} /></button></div> : null}</div>;
+  return <div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-icon"><Sparkles size={19} /><span /></div><div><strong>FrameLab</strong><small>PERSONAL AI ARCHIVE</small></div></div><nav className="main-nav"><NavButton active={view === "gallery"} icon={<LayoutGrid size={16} />} label="图库" onClick={() => chooseView("gallery")} count={statData.assets} /><NavButton active={view === "generate"} icon={<WandSparkles size={16} />} label="开始创作" onClick={() => chooseView("generate")} /><NavButton active={view === "jobs"} icon={<ListTodo size={16} />} label="任务中心" onClick={() => chooseView("jobs")} count={activeJobCount} /><NavButton active={view === "runtime"} icon={<Activity size={16} />} label="运行状态" onClick={() => chooseView("runtime")} /></nav><div className="top-actions"><span className={`connection-pill ${config.data?.ready ? "ready" : ""}`}><i />{config.data?.ready ? "API READY" : "需要配置"}</span><button type="button" className="icon-button" title="设置" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></button></div></header><main className="main-content"><section className="command-bar"><div><span className="command-line"><span className="live-pulse" />LOCAL SESSION / TRACEABLE BY DEFAULT</span><p>你的创作记录，终于有一个能回去找的地方。</p></div><div className="command-stats"><span><b>{statData.generated}</b> 生成</span><span><b>{statData.uploaded}</b> 上传</span><span><b>{statData.synced}</b> 已同步</span></div></section>{view === "gallery" ? <GalleryView assets={assets.data?.items || []} filters={filters} setFilters={setFilters} selected={selected} setSelected={setSelected} onOpen={setSelectedAssetId} onUpload={openUpload} onGenerate={() => chooseView("generate")} setNotice={setNotice} /> : null}{view === "generate" ? <GenerateView config={config.data} providers={providers.data || []} onCreated={() => { setView("jobs"); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }} setNotice={setNotice} /> : null}{view === "jobs" ? <JobsView jobs={jobs.data || []} onOpenAsset={(id) => setSelectedAssetId(id)} setNotice={setNotice} /> : null}{view === "runtime" ? <RuntimeView runtime={runtime.data} setNotice={setNotice} /> : null}</main><footer><span>FRAMELAB / LOCAL ONLY</span><span>ORIGINALS STAY ON THIS MACHINE</span><span className="footer-path">{config.data?.media_dir || config.data?.data_dir || "图片目录读取中"}</span></footer><input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={handleFile} />{selectedAssetId ? <AssetDrawer assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} onChanged={() => { queryClient.invalidateQueries({ queryKey: ["assets"] }); }} setNotice={setNotice} /> : null}{settingsOpen ? <SettingsDrawer config={config.data} providers={providers.data || []} onClose={() => setSettingsOpen(false)} setNotice={setNotice} /> : null}{notice ? <div className="toast"><Info size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice("")} aria-label="关闭提示"><X size={14} /></button></div> : null}</div>;
 }

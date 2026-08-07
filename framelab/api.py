@@ -4,10 +4,12 @@ import json
 import mimetypes
 import os
 import re
+import shutil
 import subprocess
 import sys
 import uuid
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Generator
@@ -19,11 +21,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from .config import Settings, public_url
+from .config import Settings, persist_media_dir, public_url
 from .db import init_db, make_session_factory
 from .models import Asset, AssetTag, AssetVariant, GenerationJob, JobEvent, Provider, RemoteObject, Tag, utcnow
 from .runtime import list_workers, request_worker_stop
-from .storage import absolute_media_path, create_asset_from_bytes, get_variant
+from .storage import absolute_media_path, create_asset_from_bytes, get_variant, media_reference
 
 
 class GenerateRequest(BaseModel):
@@ -34,6 +36,7 @@ class GenerateRequest(BaseModel):
     timeout: int = Field(default=600, ge=30, le=1800)
     provider_id: str | None = None
     parent_job_id: str | None = None
+    reference_asset_id: str | None = Field(default=None, max_length=36)
     sync_enabled: bool = True
 
 
@@ -44,6 +47,12 @@ class AssetUpdate(BaseModel):
     notes: str | None = None
     prompt_override: str | None = None
     sync_enabled: bool | None = None
+
+
+class MediaDirectoryUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    media_dir: str = Field(min_length=1, max_length=2000)
 
 
 class BulkTagsRequest(BaseModel):
@@ -205,10 +214,12 @@ def _asset_payload(session: Session, asset: Asset, settings: Settings, *, detail
 
 
 def _job_payload(session: Session, job: GenerationJob, *, include_events: bool = False) -> dict[str, Any]:
+    reference_asset = session.get(Asset, job.reference_asset_id) if job.reference_asset_id else None
     value: dict[str, Any] = {
         "id": job.id,
         "parent_job_id": job.parent_job_id,
         "asset_id": job.asset_id,
+        "reference_asset_id": job.reference_asset_id,
         "provider_id": job.provider_id,
         "provider_name": job.provider_name_snapshot,
         "provider_url": job.provider_url_snapshot,
@@ -228,6 +239,13 @@ def _job_payload(session: Session, job: GenerationJob, *, include_events: bool =
         "elapsed_ms": job.elapsed_ms,
         "created_at": _iso(job.created_at),
     }
+    if reference_asset is not None and reference_asset.deleted_at is None:
+        value["reference_asset"] = {
+            "id": reference_asset.id,
+            "filename": reference_asset.filename,
+            "original_filename": reference_asset.original_filename,
+            "thumbnail_url": _variant_url(reference_asset.id, "thumbnail"),
+        }
     if job.asset_id:
         value["asset_url"] = f"/api/assets/{job.asset_id}"
     if include_events:
@@ -246,6 +264,105 @@ def _job_payload(session: Session, job: GenerationJob, *, include_events: bool =
             )
         ]
     return value
+
+
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _resolve_media_dir(value: str) -> Path:
+    raw_value = value.strip()
+    if not raw_value or any(char in raw_value for char in "\x00\r\n"):
+        raise ValueError("图片目录不能为空，且不能包含换行或无效字符。")
+    candidate = Path(raw_value).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError("图片目录必须使用绝对路径。")
+    candidate = candidate.resolve()
+    if candidate == Path(candidate.anchor):
+        raise ValueError("图片目录不能直接指向磁盘根目录。")
+    return candidate
+
+
+def _move_media_contents(source: Path, target: Path) -> list[tuple[Path, Path]]:
+    if _path_is_within(target, source) or _path_is_within(source, target):
+        raise ValueError("新图片目录不能是当前图片目录本身或其父子目录。")
+    if target.exists():
+        if not target.is_dir():
+            raise ValueError("新图片目录已被同名文件占用。")
+        if any(target.iterdir()):
+            raise ValueError("新图片目录必须为空，避免覆盖已有文件。")
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+    moved: list[tuple[Path, Path]] = []
+    try:
+        for child in list(source.iterdir()):
+            destination = target / child.name
+            shutil.move(str(child), str(destination))
+            moved.append((destination, child))
+    except Exception:
+        _restore_media_contents(moved)
+        raise
+    return moved
+
+
+def _restore_media_contents(moved: list[tuple[Path, Path]]) -> None:
+    for destination, source in reversed(moved):
+        if destination.exists():
+            shutil.move(str(destination), str(source))
+
+
+def _migrate_media_dir(session_factory, settings: Settings, target: Path) -> None:
+    source = settings.media_dir.resolve()
+    target = target.resolve()
+    if source == target:
+        persist_media_dir(target)
+        return
+
+    records: list[tuple[str, str, str, str]] = []
+    with session_factory() as session:
+        assets = list(session.scalars(select(Asset)))
+        variants = list(session.scalars(select(AssetVariant)))
+        for row in assets:
+            path = absolute_media_path(row.local_path, settings)
+            if not path.is_file():
+                raise ValueError(f"找不到图片文件：{row.local_path}")
+            records.append(("asset", row.id, row.local_path, media_reference(path, settings)))
+        for row in variants:
+            path = absolute_media_path(row.local_path, settings)
+            if not path.is_file():
+                raise ValueError(f"找不到图片衍生文件：{row.local_path}")
+            records.append(("variant", row.id, row.local_path, media_reference(path, settings)))
+
+        moved = _move_media_contents(source, target)
+        try:
+            for kind, row_id, _old_path, new_path in records:
+                row = session.get(Asset if kind == "asset" else AssetVariant, row_id)
+                if row is not None:
+                    row.local_path = new_path
+            session.commit()
+        except Exception:
+            session.rollback()
+            _restore_media_contents(moved)
+            raise
+
+    try:
+        persist_media_dir(target)
+    except Exception:
+        try:
+            with session_factory() as session:
+                for kind, row_id, old_path, _new_path in records:
+                    row = session.get(Asset if kind == "asset" else AssetVariant, row_id)
+                    if row is not None:
+                        row.local_path = old_path
+                session.commit()
+        finally:
+            _restore_media_contents(moved)
+        raise
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -321,10 +438,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "base_url": settings.imgbed_base_url_public,
             },
             "data_dir": str(settings.data_dir),
+            "media_dir": str(settings.media_dir),
             "database_path": str(settings.database_path),
             "asset_count": asset_count,
             "pending_sync_count": pending_count,
             "retries": 0,
+        }
+
+    @app.patch("/api/config/media-dir")
+    def update_media_dir(payload: MediaDirectoryUpdate) -> dict[str, Any]:
+        nonlocal settings
+        try:
+            target = _resolve_media_dir(payload.media_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        current = settings.media_dir.resolve()
+        if target != current:
+            active_workers = [item for item in list_workers(settings) if item["status"] == "running"]
+            if active_workers:
+                raise HTTPException(status_code=409, detail="请先停止 worker，再迁移图片目录。")
+            try:
+                _migrate_media_dir(session_factory, settings, target)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"图片目录迁移失败：{exc}") from exc
+        else:
+            try:
+                persist_media_dir(target)
+            except OSError as exc:
+                raise HTTPException(status_code=500, detail=f"无法保存图片目录设置：{exc}") from exc
+
+        settings = replace(settings, media_dir=target)
+        app.state.settings = settings
+        return {
+            "media_dir": str(settings.media_dir),
+            "migrated": target != current,
+            "message": "图片目录已更新，现有图片已迁移。" if target != current else "图片目录设置已保存。",
         }
 
     @app.get("/api/stats")
@@ -597,7 +748,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="模型名称必须是 gpt-image-*。")
         allowed_sizes = {
             "auto", "1024x1024", "1536x864", "864x1536", "1536x1024", "1024x1536",
-            "2048x2048", "2048x1152", "1440x2560", "2560x1440", "3840x2160", "2160x3840",
+            "2048x2048", "2048x1152", "1440x2560", "2560x1440", "3840x2160", "2160x3840", "2880x2880",
         }
         if payload.size not in allowed_sizes:
             raise HTTPException(status_code=400, detail="不支持的图片尺寸。")
@@ -612,12 +763,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=503, detail=f"provider {provider.name} 尚未配置完成。")
             if payload.parent_job_id and session.get(GenerationJob, payload.parent_job_id) is None:
                 raise HTTPException(status_code=400, detail="父任务不存在。")
+            reference_asset = None
+            if payload.reference_asset_id:
+                reference_asset = session.get(Asset, payload.reference_asset_id)
+                if reference_asset is None or reference_asset.deleted_at is not None:
+                    raise HTTPException(status_code=400, detail="参考图不存在或已被删除。")
+                try:
+                    reference_path = absolute_media_path(reference_asset.local_path, settings)
+                except ValueError as exc:
+                    raise HTTPException(status_code=400, detail="参考图路径无效。") from exc
+                if not reference_path.is_file():
+                    raise HTTPException(status_code=400, detail="参考图文件不存在。")
             job = GenerationJob(
                 id=str(uuid.uuid4()),
                 parent_job_id=payload.parent_job_id,
                 provider_id=provider.id,
                 provider_name_snapshot=provider.name,
                 provider_url_snapshot=public_url(provider.base_url),
+                reference_asset_id=reference_asset.id if reference_asset else None,
                 model=payload.model,
                 prompt=payload.prompt.strip(),
                 size=payload.size,
@@ -676,6 +839,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider_id=original.provider_id,
                 provider_name_snapshot=original.provider_name_snapshot,
                 provider_url_snapshot=original.provider_url_snapshot,
+                reference_asset_id=original.reference_asset_id,
                 model=original.model,
                 prompt=original.prompt,
                 size=original.size,

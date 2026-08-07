@@ -14,6 +14,14 @@ export function getConfig() {
   return request<Config>("/api/config", { cache: "no-store" });
 }
 
+export function updateMediaDir(mediaDir: string) {
+  return request<{ media_dir: string; migrated: boolean; message: string }>("/api/config/media-dir", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ media_dir: mediaDir }),
+  });
+}
+
 export function getStats() {
   return request<Stats>("/api/stats", { cache: "no-store" });
 }
@@ -50,6 +58,10 @@ export function getAsset(id: string) {
   return request<Asset>(`/api/assets/${id}`, { cache: "no-store" });
 }
 
+export function deleteAsset(id: string) {
+  return request<{ ok: boolean; id: string }>(`/api/assets/${id}`, { method: "DELETE" });
+}
+
 export function getJobs() {
   return request<Job[]>("/api/generation/jobs?limit=80", { cache: "no-store" });
 }
@@ -62,6 +74,7 @@ export function createJob(payload: {
   timeout: number;
   provider_id?: string;
   parent_job_id?: string;
+  reference_asset_id?: string;
   sync_enabled: boolean;
 }) {
   return request<Job>("/api/generation/jobs", {

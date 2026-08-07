@@ -20,7 +20,7 @@ class ProviderError(RuntimeError):
 
 
 def _image_endpoint(base_url: str) -> str:
-    base = base_url.strip().rstrip("/")
+    base = _api_root(base_url)
     if base.endswith("/images/generations"):
         return base
     return f"{base}/images/generations"
@@ -30,24 +30,48 @@ def _async_endpoint(base_url: str) -> str:
     return f"{_image_endpoint(base_url)}/async"
 
 
+def _edits_async_endpoint(base_url: str) -> str:
+    base = _api_root(base_url)
+    if base.endswith("/images/edits"):
+        return f"{base}/async"
+    return f"{base}/images/edits/async"
+
+
 def _task_endpoint(base_url: str, task_id: str) -> str:
-    generation_endpoint = _image_endpoint(base_url)
-    api_root = generation_endpoint.removesuffix("/images/generations")
+    api_root = _api_root(base_url)
     return f"{api_root}/images/tasks/{quote(task_id, safe='')}"
 
 
-def _clean_payload(value: Any, limit: int = 12000) -> dict[str, Any] | list[Any] | str:
+def _api_root(base_url: str) -> str:
+    base = base_url.strip().rstrip("/")
+    for suffix in ("/images/generations", "/images/edits"):
+        if base.endswith(suffix):
+            return base.removesuffix(suffix)
+    return base if base.endswith("/v1") else f"{base}/v1"
+
+
+def _clean_payload(
+    value: Any,
+    limit: int = 12000,
+    redacted_keys: set[str] | frozenset[str] | None = None,
+) -> dict[str, Any] | list[Any] | str:
     """Keep diagnostics useful without persisting huge base64 payloads."""
+    redacted_keys = redacted_keys or frozenset()
     if isinstance(value, dict):
         cleaned: dict[str, Any] = {}
         for key, item in value.items():
-            if key in {"b64_json", "image_base64", "data"} and isinstance(item, str) and len(item) > 512:
+            if key in redacted_keys or key in {"b64_json", "image_base64", "input_image", "reference_image"}:
+                if isinstance(item, str):
+                    cleaned[str(key)] = f"<omitted {len(item)} chars>"
+                else:
+                    cleaned[str(key)] = "<omitted reference image>"
+            elif key == "data" and isinstance(item, str) and len(item) > 512:
                 cleaned[key] = f"<omitted {len(item)} chars>"
             else:
-                cleaned[str(key)] = _clean_payload(item, limit)
+                cleaned[str(key)] = _clean_payload(item, limit, redacted_keys)
         return cleaned
     if isinstance(value, list):
-        return [_clean_payload(item, limit) for item in value[:20]]
+        return [_clean_payload(item, limit, redacted_keys) for item in value[:20]]
     if isinstance(value, str):
         return value[:limit]
     return value
@@ -81,6 +105,7 @@ def _decode_data_url(value: str) -> bytes:
 class SubmittedTask:
     task_id: str
     response: dict[str, Any]
+    request: dict[str, Any]
 
 
 @dataclass
@@ -88,6 +113,9 @@ class ProviderResult:
     image_bytes: bytes
     suffix: str
     response: dict[str, Any]
+
+
+MAX_ASYNC_EDIT_BYTES = 15 * 1024 * 1024
 
 
 class OpenAIAsyncProvider:
@@ -102,17 +130,19 @@ class OpenAIAsyncProvider:
     def base_url(self) -> str:
         return self.provider.base_url.strip().rstrip("/")
 
-    def _headers(self) -> dict[str, str]:
-        return {
+    def _headers(self, *, multipart: bool = False) -> dict[str, str]:
+        headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Accept": "application/json",
-            "Content-Type": "application/json",
             "Connection": "close",
             "User-Agent": "FrameLab/0.1",
         }
+        if not multipart:
+            headers["Content-Type"] = "application/json"
+        return headers
 
-    def submit(self, job: GenerationJob) -> SubmittedTask:
-        payload = {
+    def build_payload(self, job: GenerationJob) -> dict[str, Any]:
+        return {
             "model": job.model,
             "prompt": job.prompt,
             "n": 1,
@@ -120,10 +150,50 @@ class OpenAIAsyncProvider:
             "quality": job.quality,
             "response_format": job.response_format,
         }
+
+    def submit(
+        self,
+        job: GenerationJob,
+        reference_image: tuple[bytes, str, str] | None = None,
+    ) -> SubmittedTask:
+        payload = self.build_payload(job)
         timeout = max(1.0, min(float(job.timeout_seconds), 1800.0))
         try:
             with httpx.Client(timeout=timeout, follow_redirects=False) as client:
-                response = client.post(_async_endpoint(self.base_url), headers=self._headers(), json=payload)
+                if reference_image is None:
+                    endpoint = _async_endpoint(self.base_url)
+                    response = client.post(endpoint, headers=self._headers(), json=payload)
+                    request_snapshot = _clean_payload(payload)
+                else:
+                    image_bytes, mime_type, filename = reference_image
+                    if not image_bytes:
+                        raise ProviderError("参考图内容为空。")
+                    if len(image_bytes) > MAX_ASYNC_EDIT_BYTES:
+                        raise ProviderError("参考图超过异步改图 15MB 限制，请压缩后重试。")
+                    endpoint = _edits_async_endpoint(self.base_url)
+                    form_data = {key: str(value) for key, value in payload.items()}
+                    files = {
+                        "image[]": (
+                            Path(filename).name or "reference-image",
+                            image_bytes,
+                            mime_type,
+                        )
+                    }
+                    response = client.post(
+                        endpoint,
+                        headers=self._headers(multipart=True),
+                        data=form_data,
+                        files=files,
+                    )
+                    request_snapshot = {
+                        **payload,
+                        "endpoint": endpoint,
+                        "image[]": {
+                            "filename": Path(filename).name or "reference-image",
+                            "mime_type": mime_type,
+                            "size_bytes": len(image_bytes),
+                        },
+                    }
         except httpx.HTTPError as exc:
             raise ProviderError(f"提交 provider 失败：{exc}") from exc
         if response.status_code >= 400:
@@ -137,7 +207,11 @@ class OpenAIAsyncProvider:
         task_id = decoded.get("task_id") or decoded.get("id")
         if not isinstance(task_id, str) or not task_id:
             raise ProviderError("provider 提交成功但响应缺少 task_id。")
-        return SubmittedTask(task_id=task_id, response=_clean_payload(decoded))
+        return SubmittedTask(
+            task_id=task_id,
+            response=_clean_payload(decoded),
+            request=_clean_payload(request_snapshot),
+        )
 
     def poll_until_done(self, task_id: str, deadline: float, on_poll=None) -> ProviderResult:
         endpoint = _task_endpoint(self.base_url, task_id)

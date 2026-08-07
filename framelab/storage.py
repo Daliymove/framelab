@@ -20,6 +20,7 @@ from .models import Asset, AssetVariant, utcnow
 
 
 ALLOWED_MIME_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif"}
+MEDIA_REFERENCE_PREFIX = "@media/"
 SUFFIX_BY_MIME = {
     "image/png": ".png",
     "image/jpeg": ".jpg",
@@ -69,11 +70,22 @@ def detect_mime(filename: str, content_type: str | None, data: bytes) -> tuple[s
 
 
 def _relative(path: Path, settings: Settings) -> str:
-    return path.relative_to(settings.data_dir).as_posix()
+    return media_reference(path, settings)
+
+
+def media_reference(path: Path, settings: Settings) -> str:
+    """Store media paths independently from the database/data directory."""
+    relative = path.resolve().relative_to(settings.media_dir.resolve()).as_posix()
+    return f"{MEDIA_REFERENCE_PREFIX}{relative}"
 
 
 def absolute_media_path(relative_path: str, settings: Settings) -> Path:
-    candidate = (settings.data_dir / relative_path).resolve()
+    if relative_path.startswith(MEDIA_REFERENCE_PREFIX):
+        candidate = (settings.media_dir / relative_path[len(MEDIA_REFERENCE_PREFIX) :]).resolve()
+    else:
+        # Paths created before configurable media directories were introduced
+        # were relative to data_dir. Keep them readable for existing libraries.
+        candidate = (settings.data_dir / relative_path).resolve()
     media_root = settings.media_dir.resolve()
     if candidate != media_root and media_root not in candidate.parents:
         raise ValueError("媒体路径越界。")

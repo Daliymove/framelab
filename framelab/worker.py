@@ -169,12 +169,26 @@ class FrameLabWorker:
     def process_generation(self, job_id: str) -> None:
         started_monotonic = time.monotonic()
         try:
+            reference_image: tuple[bytes, str, str] | None = None
             with self.session_factory() as session:
                 job = session.get(GenerationJob, job_id)
                 if job is None or job.status in TERMINAL_JOB_STATES:
                     return
                 provider, api_key = self._provider_for(session, job)
                 client = OpenAIAsyncProvider(provider, api_key, self.settings)
+                if job.reference_asset_id and not job.upstream_task_id:
+                    reference_asset = session.get(Asset, job.reference_asset_id)
+                    if reference_asset is None or reference_asset.deleted_at is not None:
+                        raise ProviderError("参考图不存在或已被删除。")
+                    try:
+                        reference_path = absolute_media_path(reference_asset.local_path, self.settings)
+                        reference_image = (
+                            reference_path.read_bytes(),
+                            reference_asset.mime_type,
+                            reference_asset.original_filename,
+                        )
+                    except (OSError, ValueError) as exc:
+                        raise ProviderError("读取参考图失败。") from exc
                 session.expunge(job)
 
             with self.session_factory() as session:
@@ -182,21 +196,12 @@ class FrameLabWorker:
                 if job is None:
                     return
                 if not job.upstream_task_id:
-                    submitted = client.submit(job)
+                    submitted = client.submit(job, reference_image=reference_image)
                     job.upstream_task_id = submitted.task_id
                     job.submitted_at = utcnow()
                     job.status = "submitted"
                     job.progress_message = f"已提交 provider 任务：{submitted.task_id}"
-                    job.request_json = _json(
-                        {
-                            "model": job.model,
-                            "prompt": job.prompt,
-                            "n": 1,
-                            "size": job.size,
-                            "quality": job.quality,
-                            "response_format": job.response_format,
-                        }
-                    )
+                    job.request_json = _json(submitted.request)
                     _event(session, job.id, "submitted", job.progress_message, submitted.response)
                     session.commit()
                 else:
