@@ -592,6 +592,25 @@ dd {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.batch-divider {
+  width: 1px;
+  height: 18px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.batch-bar .button.danger {
+  color: #ffd9d2;
+  border-color: rgba(226, 91, 69, 0.55);
+  background: rgba(226, 91, 69, 0.16);
+}
+
+.batch-bar .button.danger:hover:not(:disabled) {
+  color: #fff;
+  border-color: var(--coral);
+  background: var(--coral);
+  box-shadow: 0 7px 16px rgba(226, 91, 69, 0.28);
+}
+
 .asset-grid {
   margin-top: 14px;
   display: grid;
@@ -1511,6 +1530,19 @@ dd {
   display: flex;
   align-items: center;
   gap: 7px;
+}
+
+.job-deleted-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  border: 1px dashed var(--line);
+  border-radius: var(--control-radius-sm);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .empty-panel {

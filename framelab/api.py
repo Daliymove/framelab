@@ -64,6 +64,10 @@ class BulkSyncRequest(BaseModel):
     asset_ids: list[str] = Field(min_length=1, max_length=200)
 
 
+class BulkDeleteRequest(BaseModel):
+    asset_ids: list[str] = Field(min_length=1, max_length=200)
+
+
 class ProviderInput(BaseModel):
     id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9._-]+$")
     name: str = Field(min_length=1, max_length=200)
@@ -215,6 +219,7 @@ def _asset_payload(session: Session, asset: Asset, settings: Settings, *, detail
 
 def _job_payload(session: Session, job: GenerationJob, *, include_events: bool = False) -> dict[str, Any]:
     reference_asset = session.get(Asset, job.reference_asset_id) if job.reference_asset_id else None
+    produced_asset = session.get(Asset, job.asset_id) if job.asset_id else None
     value: dict[str, Any] = {
         "id": job.id,
         "parent_job_id": job.parent_job_id,
@@ -246,8 +251,12 @@ def _job_payload(session: Session, job: GenerationJob, *, include_events: bool =
             "original_filename": reference_asset.original_filename,
             "thumbnail_url": _variant_url(reference_asset.id, "thumbnail"),
         }
-    if job.asset_id:
+    if produced_asset is not None and produced_asset.deleted_at is None:
         value["asset_url"] = f"/api/assets/{job.asset_id}"
+    elif job.asset_id:
+        # 图片已删除：任务仍保留在队列中作为历史记录，
+        # 但不再提供跳转到图片详情的入口。
+        value["asset_deleted"] = True
     if include_events:
         value["request"] = _json_load(job.request_json, {})
         value["response"] = _json_load(job.response_json, {})
@@ -727,6 +736,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     created += 1
             session.commit()
         return {"updated": len(rows), "queued": created}
+
+    @app.post("/api/assets/bulk-delete")
+    def bulk_delete(payload: BulkDeleteRequest) -> dict[str, Any]:
+        with session_factory() as session:
+            rows = list(
+                session.scalars(
+                    select(Asset).where(Asset.id.in_(payload.asset_ids), Asset.deleted_at.is_(None))
+                )
+            )
+            now = utcnow()
+            for row in rows:
+                row.deleted_at = now
+            session.commit()
+        return {"deleted": len(rows)}
 
     @app.post("/api/assets/{asset_id}/sync")
     def sync_asset(asset_id: str) -> dict[str, Any]:

@@ -162,6 +162,34 @@ def test_delete_asset_hides_asset_and_blocks_file():
             assert client.get(asset["original_url"]).status_code == 404
 
 
+def test_bulk_delete_removes_selected_assets():
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = make_settings(Path(temporary))
+        with TestClient(create_app(settings)) as client:
+            first = client.post(
+                "/api/assets/upload",
+                files={"file": ("one.png", png_bytes((26, 122, 85)), "image/png")},
+                data={"sync_enabled": "false"},
+            ).json()["asset"]
+            second = client.post(
+                "/api/assets/upload",
+                files={"file": ("two.png", png_bytes((130, 45, 90)), "image/png")},
+                data={"sync_enabled": "false"},
+            ).json()["asset"]
+
+            response = client.post(
+                "/api/assets/bulk-delete",
+                json={"asset_ids": [first["id"], second["id"]]},
+            )
+
+            assert response.status_code == 200
+            assert response.json() == {"deleted": 2}
+            assert client.get("/api/assets").json()["total"] == 0
+            assert client.get("/api/stats").json()["assets"] == 0
+            assert client.get(f"/api/assets/{first['id']}").status_code == 404
+            assert client.get(f"/api/assets/{second['id']}").status_code == 404
+
+
 def test_media_directory_can_be_migrated_without_changing_asset_urls():
     with tempfile.TemporaryDirectory() as temporary:
         settings = make_settings(Path(temporary))
@@ -241,6 +269,105 @@ def test_generation_worker_submits_once_and_records_trace():
                 assert asset["generation"]["prompt"] == job["prompt"]
                 assert FakeImageApiHandler.submissions == 1
                 assert FakeImageApiHandler.polls >= 1
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_deleted_asset_job_is_marked_in_queue_payload():
+    FakeImageApiHandler.submissions = 0
+    FakeImageApiHandler.polls = 0
+    FakeImageApiHandler.last_path = ""
+    FakeImageApiHandler.last_body = b""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeImageApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ,
+            {
+                "FRAMELAB_DATA_DIR": temporary,
+                "CODEX_IMAGE_API_KEY": "test-key",
+                "CODEX_IMAGE_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                "CODEX_IMAGE_POLL_INTERVAL": "0.01",
+                "FRAMELAB_IMGBED_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            settings = Settings.from_env()
+            with TestClient(create_app(settings)) as client:
+                created = client.post(
+                    "/api/generation/jobs",
+                    json={
+                        "prompt": "队列里应标记图片已删除",
+                        "model": "gpt-image-2",
+                        "size": "auto",
+                        "quality": "high",
+                        "timeout": 120,
+                        "sync_enabled": False,
+                    },
+                ).json()
+                worker = FrameLabWorker(settings)
+                try:
+                    assert worker.run_once() is True
+                finally:
+                    worker.close()
+
+                job = client.get("/api/generation/jobs").json()[0]
+                asset_id = job["asset_id"]
+                assert job["asset_url"] == f"/api/assets/{asset_id}"
+                assert "asset_deleted" not in job
+
+                response = client.delete(f"/api/assets/{asset_id}")
+                assert response.status_code == 200
+
+                job = client.get("/api/generation/jobs").json()[0]
+                assert job["asset_id"] == asset_id
+                assert job["asset_deleted"] is True
+                assert "asset_url" not in job
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_deleted_asset_is_not_uploaded_to_imgbed():
+    FakeImgBedHandler.uploads = 0
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeImgBedHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ,
+            {
+                "FRAMELAB_DATA_DIR": temporary,
+                "FRAMELAB_IMGBED_BASE_URL": f"http://127.0.0.1:{server.server_port}",
+                "FRAMELAB_IMGBED_API_TOKEN": "imgbed_test-token",
+                "FRAMELAB_IMGBED_AUTH_CODE": "upload-test-code",
+                "FRAMELAB_IMGBED_UPLOAD_CHANNEL": "discord",
+                "FRAMELAB_IMGBED_UPLOAD_CHANNEL_NAME": "discard-image",
+                "FRAMELAB_IMGBED_ENABLED": "true",
+            },
+            clear=False,
+        ):
+            settings = Settings.from_env()
+            with TestClient(create_app(settings)) as client:
+                uploaded = client.post(
+                    "/api/assets/upload",
+                    files={"file": ("sample.png", png_bytes(), "image/png")},
+                    data={"sync_enabled": "true"},
+                ).json()
+                asset_id = uploaded["asset"]["id"]
+                assert client.delete(f"/api/assets/{asset_id}").status_code == 200
+
+                worker = FrameLabWorker(settings)
+                try:
+                    assert worker.run_once() is True
+                finally:
+                    worker.close()
+
+                assert FakeImgBedHandler.uploads == 0
     finally:
         server.shutdown()
         server.server_close()

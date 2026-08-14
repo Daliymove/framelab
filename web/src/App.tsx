@@ -42,6 +42,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  bulkDelete,
   bulkSync,
   bulkTags,
   createJob,
@@ -219,6 +220,7 @@ function AssetDrawer({ assetId, onClose, onChanged, setNotice }: { assetId: stri
       queryClient.removeQueries({ queryKey: ["asset", assetId] });
       queryClient.invalidateQueries({ queryKey: ["assets"] });
       queryClient.invalidateQueries({ queryKey: ["stats"] });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
       setNotice("图片已从图库删除");
       onChanged();
       onClose();
@@ -363,6 +365,21 @@ function GalleryView({ assets, filters, setFilters, selected, setSelected, onOpe
   const [tagInput, setTagInput] = useState("");
   const sync = useMutation({ mutationFn: () => bulkSync([...selected]), onSuccess: (result) => { setNotice(`${result.queued} 张图片已加入同步队列`); setSelected(new Set()); queryClient.invalidateQueries({ queryKey: ["assets"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); } });
   const tag = useMutation({ mutationFn: () => bulkTags([...selected], tagInput.split(",").map((item) => item.trim()).filter(Boolean)), onSuccess: () => { setNotice("批量标签已保存"); setTagInput(""); setSelected(new Set()); queryClient.invalidateQueries({ queryKey: ["assets"] }); queryClient.invalidateQueries({ queryKey: ["tags"] }); } });
+  const remove = useMutation({
+    mutationFn: () => bulkDelete([...selected]),
+    onSuccess: (result) => {
+      setNotice(result.deleted ? `已删除 ${result.deleted} 张图片` : "没有可删除的图片");
+      setSelected(new Set());
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    },
+    onError: (error) => setNotice(error instanceof Error ? error.message : "批量删除失败"),
+  });
+  const handleBatchDelete = () => {
+    if (!selected.size || remove.isPending) return;
+    if (window.confirm(`确定删除选中的 ${selected.size} 张图片？删除后无法恢复。`)) remove.mutate();
+  };
   const allSelected = assets.length > 0 && assets.every((asset) => selected.has(asset.id));
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(assets.map((asset) => asset.id)));
   return <div className="view-stack">
@@ -372,7 +389,7 @@ function GalleryView({ assets, filters, setFilters, selected, setSelected, onOpe
       <div className="filter-select"><Filter size={15} /><select value={filters.source} onChange={(event) => setFilters({ ...filters, source: event.target.value })}><option value="all">全部来源</option><option value="generated">AI 生成</option><option value="upload">本地上传</option></select></div>
       <div className="filter-select"><CloudUpload size={15} /><select value={filters.sync_status} onChange={(event) => setFilters({ ...filters, sync_status: event.target.value })}><option value="all">全部同步状态</option><option value="succeeded">已同步</option><option value="pending">待同步</option><option value="failed">同步失败</option><option value="disabled">仅本地</option></select></div>
     </div>
-    {selected.size ? <div className="batch-bar"><span><Check size={15} />已选择 {selected.size} 张</span><div className="batch-actions"><div className="batch-tag-input"><TagIcon size={14} /><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="标签，逗号分隔" /></div><button type="button" className="button small quiet" onClick={() => tag.mutate()} disabled={!tagInput.trim() || tag.isPending}><TagIcon size={14} />打标签</button><button type="button" className="button small quiet" onClick={() => sync.mutate()} disabled={sync.isPending}><CloudUpload size={14} />同步图床</button><button type="button" className="icon-button small" onClick={() => setSelected(new Set())} aria-label="取消选择"><X size={15} /></button></div></div> : <div className="selection-hint"><button type="button" onClick={toggleAll}>{allSelected ? "取消全选" : "选择当前页"}</button><span>点击图片查看详情，选择后可批量整理</span></div>}
+    {selected.size ? <div className="batch-bar"><span><Check size={15} />已选择 {selected.size} 张</span><div className="batch-actions"><div className="batch-tag-input"><TagIcon size={14} /><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="标签，逗号分隔" /></div><button type="button" className="button small quiet" onClick={() => tag.mutate()} disabled={!tagInput.trim() || tag.isPending}><TagIcon size={14} />打标签</button><button type="button" className="button small quiet" onClick={() => sync.mutate()} disabled={sync.isPending}><CloudUpload size={14} />同步图床</button><span className="batch-divider" /><button type="button" className="button small danger" onClick={handleBatchDelete} disabled={remove.isPending}><Trash2 size={14} />{remove.isPending ? "删除中" : "删除"}</button><button type="button" className="icon-button small" onClick={() => setSelected(new Set())} aria-label="取消选择"><X size={15} /></button></div></div> : <div className="selection-hint"><button type="button" onClick={toggleAll}>{allSelected ? "取消全选" : "选择当前页"}</button><span>点击图片查看详情，选择后可批量整理</span></div>}
     {assets.length ? <div className="asset-grid">{assets.map((asset) => <AssetCard key={asset.id} asset={asset} selected={selected.has(asset.id)} onSelect={() => { const next = new Set(selected); next.has(asset.id) ? next.delete(asset.id) : next.add(asset.id); setSelected(next); }} onOpen={() => onOpen(asset.id)} />)}</div> : <EmptyGallery onGenerate={onGenerate} onUpload={onUpload} />}
   </div>;
 }
@@ -459,7 +476,7 @@ function JobsView({ jobs, onOpenAsset, setNotice }: { jobs: Job[]; onOpenAsset: 
   const retry = useMutation({ mutationFn: (id: string) => retryJob(id), onSuccess: (job) => { setNotice(`已创建手动重试任务 ${job.id.slice(0, 8)}`); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); } });
   const active = jobs.filter((job) => !["succeeded", "failed", "canceled"].includes(job.status));
   const failed = jobs.filter((job) => job.status === "failed");
-  return <div className="view-stack"><div className="view-heading"><div><p className="kicker">JOB CONTROL</p><h1>任务中心</h1><p className="view-subtitle">后台任务不会因为关闭浏览器而停止。</p></div><div className="job-summary"><span><i className="blue-dot" />{active.length} 处理中</span><span><i className="red-dot" />{failed.length} 失败</span></div></div><div className="job-list">{jobs.length ? jobs.map((job) => <article className={`job-row ${job.status}`} key={job.id}><div className="job-status"><StatusIcon status={job.status} /><span>{statusLabel(job.status)}</span></div><div className="job-main"><div className="job-title"><strong>{job.prompt.slice(0, 140)}</strong><span className="mono">{job.id.slice(0, 8)}</span></div><p>{job.progress_message}</p><div className="job-meta"><span><WandSparkles size={13} />{job.provider_name}</span><span><Timer size={13} />{formatDuration(job.elapsed_ms)}</span><span>{job.model}</span>{job.reference_asset_id ? <span><ImagePlus size={13} />参考图</span> : null}<span>{formatDate(job.created_at)}</span></div></div><div className="job-actions">{job.asset_id ? <button type="button" className="button small quiet" onClick={() => onOpenAsset(job.asset_id!)}><FileImage size={14} />查看图片</button> : null}{job.status === "failed" ? <button type="button" className="button small quiet" onClick={() => retry.mutate(job.id)} disabled={retry.isPending}><RefreshCw size={14} />手动重试</button> : null}</div></article>) : <div className="empty-panel"><ListTodo size={30} /><strong>还没有生成任务</strong><span>去“开始创作”提交第一条 prompt。</span></div>}</div></div>;
+  return <div className="view-stack"><div className="view-heading"><div><p className="kicker">JOB CONTROL</p><h1>任务中心</h1><p className="view-subtitle">后台任务不会因为关闭浏览器而停止。</p></div><div className="job-summary"><span><i className="blue-dot" />{active.length} 处理中</span><span><i className="red-dot" />{failed.length} 失败</span></div></div><div className="job-list">{jobs.length ? jobs.map((job) => <article className={`job-row ${job.status}`} key={job.id}><div className="job-status"><StatusIcon status={job.status} /><span>{statusLabel(job.status)}</span></div><div className="job-main"><div className="job-title"><strong>{job.prompt.slice(0, 140)}</strong><span className="mono">{job.id.slice(0, 8)}</span></div><p>{job.progress_message}</p><div className="job-meta"><span><WandSparkles size={13} />{job.provider_name}</span><span><Timer size={13} />{formatDuration(job.elapsed_ms)}</span><span>{job.model}</span>{job.reference_asset_id ? <span><ImagePlus size={13} />参考图</span> : null}<span>{formatDate(job.created_at)}</span></div></div><div className="job-actions">{job.asset_deleted ? <span className="job-deleted-hint" title="对应图片已从图库删除"><Trash2 size={14} />图片已删除</span> : job.asset_id ? <button type="button" className="button small quiet" onClick={() => onOpenAsset(job.asset_id!)}><FileImage size={14} />查看图片</button> : null}{job.status === "failed" ? <button type="button" className="button small quiet" onClick={() => retry.mutate(job.id)} disabled={retry.isPending}><RefreshCw size={14} />手动重试</button> : null}</div></article>) : <div className="empty-panel"><ListTodo size={30} /><strong>还没有生成任务</strong><span>去“开始创作”提交第一条 prompt。</span></div>}</div></div>;
 }
 
 export default function App() {
@@ -475,20 +492,37 @@ export default function App() {
   const stats = useQuery({ queryKey: ["stats"], queryFn: getStats, refetchInterval: 5000 });
   const providers = useQuery({ queryKey: ["providers"], queryFn: getProviders });
   const tags = useQuery({ queryKey: ["tags"], queryFn: getTags });
+  const jobs = useQuery({ queryKey: ["jobs"], queryFn: getJobs, refetchInterval: 2000 });
   const assets = useQuery({
     queryKey: ["assets", filters],
     queryFn: () => getAssets(filters),
     refetchInterval: (query) => {
       const current = query.state.data as AssetPage | undefined;
-      return current?.items.some((asset) => isSyncInProgress(asset.remote.status)) ? 2000 : false;
+      const syncInProgress = current?.items.some((asset) => isSyncInProgress(asset.remote.status)) ?? false;
+      const generationInProgress = (jobs.data || []).some(
+        (job) => !["succeeded", "failed", "canceled"].includes(job.status),
+      );
+      // 2s 快轮询用于同步/生成进行中；空闲时也保留 10s 兜底轮询，
+      // 避免上传（尤其是 sync_enabled=false 的参考图）后列表一直停留在旧数据，
+      // 而顶部数量（stats 5s 轮询）已经更新。
+      return syncInProgress || generationInProgress ? 2000 : 10000;
     },
   });
-  const jobs = useQuery({ queryKey: ["jobs"], queryFn: getJobs, refetchInterval: 2000 });
   const runtime = useQuery({ queryKey: ["runtime"], queryFn: getRuntime, refetchInterval: 2000 });
+  const succeededJobIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    const jobsList = jobs.data || [];
+    const newlySucceeded = jobsList.some((job) => job.status === "succeeded" && !succeededJobIds.current.has(job.id));
+    if (newlySucceeded) {
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+    }
+    succeededJobIds.current = new Set(jobsList.map((job) => job.id));
+  }, [jobs.data, queryClient]);
   const upload = useMutation({ mutationFn: (file: File) => uploadAsset(file, { title: "", notes: "", tags: "", sync_enabled: true }), onSuccess: (result) => { setNotice(result.created ? "图片已入库并进入同步队列" : "检测到相同文件，已打开已有记录"); queryClient.invalidateQueries({ queryKey: ["assets"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); setSelectedAssetId(result.asset.id); }, onError: (error) => setNotice(error.message) });
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 4200); return () => window.clearTimeout(timer); }, [notice]);
   const activeJobCount = useMemo(() => (jobs.data || []).filter((job) => !["succeeded", "failed", "canceled"].includes(job.status)).length, [jobs.data]);
-  const chooseView = (next: View) => { setView(next); setSelected(new Set()); };
+  const chooseView = (next: View) => { setView(next); setSelected(new Set()); if (next === "gallery") { queryClient.invalidateQueries({ queryKey: ["assets"] }); } };
   const openUpload = () => fileInput.current?.click();
   const handleFile = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) upload.mutate(file); event.target.value = ""; };
   const statData: Stats = stats.data || { assets: 0, generated: 0, uploaded: 0, active_jobs: 0, failed_jobs: 0, synced: 0 };

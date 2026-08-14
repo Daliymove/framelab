@@ -95,6 +95,7 @@ export interface Job {
   elapsed_ms: number | null;
   created_at: string | null;
   asset_url?: string;
+  asset_deleted?: boolean;
   request?: Record<string, unknown>;
   response?: Record<string, unknown>;
   events?: JobEvent[];

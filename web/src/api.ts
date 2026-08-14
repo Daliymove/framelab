@@ -116,6 +116,14 @@ export function bulkTags(assetIds: string[], tags: string[]) {
   });
 }
 
+export function bulkDelete(assetIds: string[]) {
+  return request<{ deleted: number }>("/api/assets/bulk-delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ asset_ids: assetIds }),
+  });
+}
+
 export async function uploadAsset(file: File, values: { title: string; notes: string; tags: string; sync_enabled: boolean }) {
   const form = new FormData();
   form.append("file", file);

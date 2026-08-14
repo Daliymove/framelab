@@ -296,6 +296,8 @@ class FrameLabWorker:
                 asset = session.get(Asset, remote.asset_id)
                 if asset is None:
                     raise ImgBedError("本地资源不存在。")
+                if asset.deleted_at is not None:
+                    raise ImgBedError("图片已删除，已跳过图床同步。")
                 path = absolute_media_path(asset.local_path, self.settings)
                 filename = asset.filename
                 mime_type = asset.mime_type
