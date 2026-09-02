@@ -94,7 +94,15 @@ if ($DataDir) {
 }
 
 $workerArgs = @("-m", "framelab.worker")
+$previousWorkerParentPid = $env:FRAMELAB_WORKER_PARENT_PID
+$env:FRAMELAB_WORKER_PARENT_PID = [string]$PID
 $worker = Start-Process -FilePath $venvPython -ArgumentList $workerArgs -WorkingDirectory $appDir -PassThru -WindowStyle Hidden
+if ($null -eq $previousWorkerParentPid) {
+    Remove-Item Env:FRAMELAB_WORKER_PARENT_PID -ErrorAction SilentlyContinue
+}
+else {
+    $env:FRAMELAB_WORKER_PARENT_PID = $previousWorkerParentPid
+}
 
 try {
     $serverArgs = @((Join-Path $appDir "server.py"), "--port", [string]$Port)

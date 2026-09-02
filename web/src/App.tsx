@@ -35,6 +35,7 @@ import {
   Sparkles,
   Square,
   Tag as TagIcon,
+  Terminal,
   Timer,
   Trash2,
   Upload,
@@ -45,11 +46,14 @@ import {
   bulkDelete,
   bulkSync,
   bulkTags,
+  cancelJob,
   createJob,
   deleteAsset,
+  deleteJob,
   getAsset,
   getAssets,
   getConfig,
+  getJob,
   getJobs,
   getRuntime,
   getProviders,
@@ -394,16 +398,38 @@ function GalleryView({ assets, filters, setFilters, selected, setSelected, onOpe
   </div>;
 }
 
+function useGenerateDraftState<T>(key: string, initialValue: T) {
+  const storageKey = `framelab.generate.${key}`;
+  const [value, setValue] = useState<T>(() => {
+    try {
+      const stored = sessionStorage.getItem(storageKey);
+      return stored === null ? initialValue : JSON.parse(stored) as T;
+    } catch {
+      return initialValue;
+    }
+  });
+  useEffect(() => {
+    try {
+      sessionStorage.setItem(storageKey, JSON.stringify(value));
+    } catch {
+      // Storage may be unavailable in private or restricted browser contexts.
+    }
+  }, [storageKey, value]);
+  return [value, setValue] as const;
+}
+
 function GenerateView({ config, providers, onCreated, setNotice }: { config?: Config; providers: Provider[]; onCreated: () => void; setNotice: (value: string) => void }) {
-  const [prompt, setPrompt] = useState("把参考图美化成一张更精致的作品，保留主体和核心构图，优化光线、材质、色彩与细节，画面干净，无 logo 和水印。");
-  const [model, setModel] = useState("gpt-image-2");
-  const [size, setSize] = useState("auto");
-  const [quality, setQuality] = useState("high");
-  const [timeout, setTimeoutValue] = useState(600);
-  const [providerId, setProviderId] = useState("");
-  const [syncEnabled, setSyncEnabled] = useState(true);
-  const [parentJobId, setParentJobId] = useState("");
-  const [referenceAsset, setReferenceAsset] = useState<Asset | null>(null);
+  const [prompt, setPrompt] = useGenerateDraftState("prompt", "把参考图美化成一张更精致的作品，保留主体和核心构图，优化光线、材质、色彩与细节，画面干净，无 logo 和水印。");
+  const [model, setModel] = useGenerateDraftState("model", "gpt-image-2");
+  const [size, setSize] = useGenerateDraftState("size", "auto");
+  const [quality, setQuality] = useGenerateDraftState("quality", "high");
+  const [timeout, setTimeoutValue] = useGenerateDraftState("timeout", 600);
+  const [providerId, setProviderId] = useGenerateDraftState("provider", "");
+  const [endpoint, setEndpoint] = useGenerateDraftState("endpoint", "");
+  const [extraParamsText, setExtraParamsText] = useGenerateDraftState("extra-params", "");
+  const [syncEnabled, setSyncEnabled] = useGenerateDraftState("sync-enabled", true);
+  const [parentJobId, setParentJobId] = useGenerateDraftState("parent-job", "");
+  const [referenceAsset, setReferenceAsset] = useGenerateDraftState<Asset | null>("reference-asset", null);
   const referenceFileInput = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
   const referenceUpload = useMutation({
@@ -416,11 +442,33 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "参考图上传失败"),
   });
+  const extraParamsResult = parseExtraParams(extraParamsText);
   const mutation = useMutation({
-    mutationFn: () => createJob({ prompt, model, size, quality, timeout, provider_id: providerId || undefined, parent_job_id: parentJobId || undefined, reference_asset_id: referenceAsset?.id || undefined, sync_enabled: syncEnabled }),
+    mutationFn: () => createJob({ prompt, model, size, quality, timeout, endpoint: endpoint.trim() || undefined, extra_params: extraParamsResult.params, provider_id: providerId || undefined, parent_job_id: parentJobId || undefined, reference_asset_id: referenceAsset?.id || undefined, sync_enabled: syncEnabled }),
     onSuccess: (job) => { setNotice(`任务 ${job.id.slice(0, 8)} 已加入队列`); onCreated(); },
   });
   const chosenProvider = providers.find((item) => item.id === (providerId || config?.provider.id));
+  const effectiveEndpoint = endpoint.trim() || defaultGenerationEndpoint(chosenProvider?.base_url || config?.provider.base_url, Boolean(referenceAsset));
+  const requestPreview = useMemo(() => ({
+    method: "POST",
+    endpoint: effectiveEndpoint || "未配置",
+    model,
+    prompt: "...",
+    n: 1,
+    size,
+    quality,
+    response_format: "url",
+    ...extraParamsResult.params,
+    ...(referenceAsset ? { "image[]": { filename: referenceAsset.original_filename, mime_type: referenceAsset.mime_type, size_bytes: referenceAsset.size_bytes } } : {}),
+  }), [effectiveEndpoint, extraParamsResult.params, model, prompt, quality, referenceAsset, size]);
+  const copyRequest = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(requestPreview, null, 2));
+      setNotice("请求预览已复制");
+    } catch {
+      setNotice("浏览器不允许复制，请直接选中预览内容");
+    }
+  };
   const handleReferenceFile = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (file) referenceUpload.mutate(file);
@@ -435,6 +483,8 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
     if (!prompt.trim()) return;
     if (referenceUpload.isPending) { setNotice("参考图仍在上传，请稍候"); return; }
     if (timeout < 30 || timeout > 1800) { setNotice("最长等待必须在 30 到 1800 秒之间"); return; }
+    if (endpointError(endpoint)) { setNotice(endpointError(endpoint)); return; }
+    if (extraParamsResult.error) { setNotice(extraParamsResult.error); return; }
     mutation.mutate();
   };
   return (
@@ -461,22 +511,155 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
         <aside className="generation-options panel">
           <div className="panel-heading compact"><span className="panel-number">02</span><div><p className="kicker">REQUEST SNAPSHOT</p><h2>请求参数</h2></div></div>
           <label className="input-label">Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.ready ? " · ready" : " · 未配置"}</option>)}</select></label>
+          <label className="input-label">调用地址<div className="endpoint-field"><b>POST</b><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="留空按 Provider 自动拼接" spellCheck={false} /></div></label>
+          <p className="field-help">可填完整的 HTTP 地址，例如 https://api.example.com/v1/images/generations。填写后只覆盖本次任务。</p>
+          {endpointError(endpoint) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{endpointError(endpoint)}</div> : null}
           <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<select value={size} onChange={(event) => setSize(event.target.value)}><option value="auto">Auto</option><option value="1024x1024">1024 × 1024</option><option value="1536x864">1536 × 864</option><option value="864x1536">864 × 1536</option><option value="2048x2048">2048 × 2048</option><option value="2560x1440">2560 × 1440</option><option value="1440x2560">1440 × 2560</option><option value="3840x2160">3840 × 2160</option><option value="2160x3840">2160 × 3840</option><option value="2880x2880">2880 × 2880</option></select></label></div>
           <fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset>
           <label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label>
+          <label className="input-label extra-params-label">附加参数<textarea value={extraParamsText} onChange={(event) => setExtraParamsText(event.target.value)} rows={7} spellCheck={false} placeholder={'{\n  "async": true\n}'} /></label>
+          <p className="field-help">仅填写 provider body 参数。模型、prompt、n、尺寸、质量和 response_format 由上方控件生成。</p>
+          {extraParamsResult.error ? <div className="inline-error compact-error"><AlertTriangle size={15} />{extraParamsResult.error}</div> : null}
           <div className="request-summary"><div><span>调用方式</span><strong><span className="status-live" />{referenceAsset ? "ASYNC EDIT" : "ASYNC JOB"}</strong></div><div><span>Provider</span><strong>{chosenProvider?.base_url || "未配置"}</strong></div><div><span>参考图</span><strong>{referenceAsset ? "1 张 · image[]" : "未选择"}</strong></div><div><span>自动重试</span><strong>0 次</strong></div></div>
+          <section className="request-preview" aria-label="完整请求预览">
+            <div className="request-preview-head"><div><span className="section-label"><Terminal size={14} />完整请求</span><small>prompt 仅在预览中省略，实际发送完整内容</small></div><button type="button" className="icon-button small" onClick={copyRequest} title="复制请求预览" aria-label="复制请求预览"><Copy size={14} /></button></div>
+            <pre>{JSON.stringify(requestPreview, null, 2)}</pre>
+          </section>
         </aside>
       </form>
     </div>
   );
 }
 
+function JobLogPanel({ jobId, onClose }: { jobId: string; onClose: () => void }) {
+  const detail = useQuery({
+    queryKey: ["job", jobId],
+    queryFn: () => getJob(jobId),
+    refetchInterval: (query) => {
+      const job = query.state.data as Job | undefined;
+      return job && !["succeeded", "failed", "canceled"].includes(job.status) ? 1500 : false;
+    },
+  });
+  const job = detail.data;
+
+  return (
+    <section className="job-log-panel">
+      <div className="job-log-head">
+        <div><p className="kicker">TASK LOG</p><h3>任务日志 <span className="mono">{jobId.slice(0, 8)}</span></h3></div>
+        <button type="button" className="icon-button small" onClick={onClose} aria-label="关闭日志"><X size={15} /></button>
+      </div>
+      {detail.isLoading ? <div className="job-log-empty"><LoaderCircle className="spin" /><span>读取任务日志...</span></div> : null}
+      {detail.error ? <div className="inline-error"><AlertTriangle size={15} />无法读取任务日志</div> : null}
+      {job ? <>
+        <div className="job-log-summary">
+          <span><b>状态</b>{statusLabel(job.status)}</span>
+          <span><b>Provider</b>{job.provider_name}</span>
+          <span><b>Task ID</b><code>{job.upstream_task_id || "-"}</code></span>
+          <span><b>耗时</b>{formatDuration(job.elapsed_ms)}</span>
+        </div>
+        {job.error_message ? <p className="error-detail">{job.error_message}</p> : null}
+        <div className="job-event-list">
+          {job.events?.length ? job.events.map((event) => {
+            const hasPayload = Object.keys(event.payload || {}).length > 0;
+            return <article className="job-event" key={event.id}>
+              <div className="job-event-head"><span className={`job-event-type ${event.type}`}>{event.type}</span><time>{formatDate(event.created_at)}</time></div>
+              <p>{event.message || "-"}</p>
+              {hasPayload ? <pre>{JSON.stringify(event.payload, null, 2)}</pre> : null}
+            </article>;
+          }) : <p className="muted-copy">暂无事件记录</p>}
+        </div>
+        <details className="job-log-data" open><summary>请求快照（prompt 已省略）</summary><pre>{JSON.stringify(requestForDisplay(job.request), null, 2)}</pre></details>
+        <details className="job-log-data"><summary>最后响应</summary><pre>{JSON.stringify(job.response || {}, null, 2)}</pre></details>
+      </> : null}
+    </section>
+  );
+}
+
+const RESERVED_REQUEST_KEYS = ["model", "prompt", "n", "size", "quality", "response_format", "method", "endpoint", "image[]"];
+
+function defaultGenerationEndpoint(baseUrl: string | undefined, hasReference: boolean) {
+  const base = (baseUrl || "").replace(/\/+$/, "");
+  if (!base) return "";
+  const root = base.endsWith("/images/generations") || base.endsWith("/images/edits")
+    ? base.replace(/\/images\/(generations|edits)$/, "")
+    : base.endsWith("/v1") ? base : `${base}/v1`;
+  return `${root}/images/${hasReference ? "edits" : "generations"}/async`;
+}
+
+function parseExtraParams(value: string): { params: Record<string, unknown>; error: string } {
+  if (!value.trim()) return { params: {}, error: "" };
+  try {
+    const decoded: unknown = JSON.parse(value);
+    if (!decoded || Array.isArray(decoded) || typeof decoded !== "object") {
+      return { params: {}, error: "附加参数必须是 JSON 对象，例如 {\"async\": true}。" };
+    }
+    const reserved = Object.keys(decoded).filter((key) => RESERVED_REQUEST_KEYS.includes(key));
+    if (reserved.length) return { params: {}, error: `附加参数不能覆盖表单字段：${reserved.join(", ")}。` };
+    return { params: decoded as Record<string, unknown>, error: "" };
+  } catch {
+    return { params: {}, error: "附加参数不是有效 JSON，请检查括号、引号和逗号。" };
+  }
+}
+
+function endpointError(value: string) {
+  if (!value.trim()) return "";
+  try {
+    const parsed = new URL(value.trim());
+    if (!(parsed.protocol === "http:" || parsed.protocol === "https:")) return "调用地址必须使用 http 或 https。";
+    if (parsed.username || parsed.password || parsed.hash) return "调用地址不能包含账号、密码或片段。";
+    return "";
+  } catch {
+    return "调用地址必须是完整的 http 或 https URL。";
+  }
+}
+
+function requestForDisplay(request: Record<string, unknown> | undefined) {
+  if (!request) return {};
+  return Object.prototype.hasOwnProperty.call(request, "prompt") ? { ...request, prompt: "..." } : request;
+}
+
+type JobFilter = "all" | "active" | "succeeded" | "failed" | "canceled";
+
 function JobsView({ jobs, onOpenAsset, setNotice }: { jobs: Job[]; onOpenAsset: (id: string) => void; setNotice: (value: string) => void }) {
   const queryClient = useQueryClient();
-  const retry = useMutation({ mutationFn: (id: string) => retryJob(id), onSuccess: (job) => { setNotice(`已创建手动重试任务 ${job.id.slice(0, 8)}`); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); } });
+  const [logJobId, setLogJobId] = useState<string | null>(null);
+  const [jobFilter, setJobFilter] = useState<JobFilter>("all");
+  const copyJobId = async (id: string) => {
+    try {
+      await navigator.clipboard.writeText(id);
+      setNotice("Job ID 已复制");
+    } catch {
+      setNotice("浏览器不允许复制，请直接选中 Job ID");
+    }
+  };
+  const retry = useMutation({ mutationFn: (id: string) => retryJob(id), onSuccess: (job) => { setNotice(`已创建手动重试任务 ${job.id.slice(0, 8)}`); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }, onError: (error) => setNotice(error instanceof Error ? error.message : "手动重试失败") });
+  const cancel = useMutation({ mutationFn: (id: string) => cancelJob(id), onSuccess: (job) => { setNotice(`任务 ${job.id.slice(0, 8)} 已停止`); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["job", job.id] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }, onError: (error) => setNotice(error instanceof Error ? error.message : "停止任务失败") });
+  const remove = useMutation({ mutationFn: (id: string) => deleteJob(id), onSuccess: (result) => { setLogJobId(null); setNotice(`任务 ${result.id.slice(0, 8)} 已删除`); queryClient.removeQueries({ queryKey: ["job", result.id] }); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }, onError: (error) => setNotice(error instanceof Error ? error.message : "删除任务失败") });
   const active = jobs.filter((job) => !["succeeded", "failed", "canceled"].includes(job.status));
   const failed = jobs.filter((job) => job.status === "failed");
-  return <div className="view-stack"><div className="view-heading"><div><p className="kicker">JOB CONTROL</p><h1>任务中心</h1><p className="view-subtitle">后台任务不会因为关闭浏览器而停止。</p></div><div className="job-summary"><span><i className="blue-dot" />{active.length} 处理中</span><span><i className="red-dot" />{failed.length} 失败</span></div></div><div className="job-list">{jobs.length ? jobs.map((job) => <article className={`job-row ${job.status}`} key={job.id}><div className="job-status"><StatusIcon status={job.status} /><span>{statusLabel(job.status)}</span></div><div className="job-main"><div className="job-title"><strong>{job.prompt.slice(0, 140)}</strong><span className="mono">{job.id.slice(0, 8)}</span></div><p>{job.progress_message}</p><div className="job-meta"><span><WandSparkles size={13} />{job.provider_name}</span><span><Timer size={13} />{formatDuration(job.elapsed_ms)}</span><span>{job.model}</span>{job.reference_asset_id ? <span><ImagePlus size={13} />参考图</span> : null}<span>{formatDate(job.created_at)}</span></div></div><div className="job-actions">{job.asset_deleted ? <span className="job-deleted-hint" title="对应图片已从图库删除"><Trash2 size={14} />图片已删除</span> : job.asset_id ? <button type="button" className="button small quiet" onClick={() => onOpenAsset(job.asset_id!)}><FileImage size={14} />查看图片</button> : null}{job.status === "failed" ? <button type="button" className="button small quiet" onClick={() => retry.mutate(job.id)} disabled={retry.isPending}><RefreshCw size={14} />手动重试</button> : null}</div></article>) : <div className="empty-panel"><ListTodo size={30} /><strong>还没有生成任务</strong><span>去“开始创作”提交第一条 prompt。</span></div>}</div></div>;
+  const tabs: Array<{ key: JobFilter; label: string; count: number }> = [
+    { key: "all", label: "全部", count: jobs.length },
+    { key: "active", label: "进行中", count: active.length },
+    { key: "succeeded", label: "已完成", count: jobs.filter((job) => job.status === "succeeded").length },
+    { key: "failed", label: "失败", count: failed.length },
+    { key: "canceled", label: "已取消", count: jobs.filter((job) => job.status === "canceled").length },
+  ];
+  const visibleJobs = jobFilter === "all" ? jobs : jobFilter === "active" ? active : jobs.filter((job) => job.status === jobFilter);
+  return <div className="view-stack"><div className="view-heading"><div><p className="kicker">JOB CONTROL</p><h1>任务中心</h1><p className="view-subtitle">后台任务不会因为关闭浏览器而停止。</p><div className="job-tabs" role="tablist" aria-label="任务状态"><span className="job-tabs-label">筛选任务</span>{tabs.map((tab) => <button type="button" role="tab" aria-selected={jobFilter === tab.key} className={`job-tab ${jobFilter === tab.key ? "active" : ""}`} key={tab.key} onClick={() => { setJobFilter(tab.key); setLogJobId(null); }}><span>{tab.label}</span><b>{tab.count}</b></button>)}</div></div><div className="job-summary"><span><i className="blue-dot" />{active.length} 处理中</span><span><i className="red-dot" />{failed.length} 失败</span></div></div>{visibleJobs.length ? <div className="job-list">{visibleJobs.map((job) => {
+    const isActive = !["succeeded", "failed", "canceled"].includes(job.status);
+    return <article className={`job-row ${job.status}`} key={job.id}>
+      <div className="job-status"><StatusIcon status={job.status} /><span>{statusLabel(job.status)}</span></div>
+      <div className="job-main"><div className="job-title"><strong>{job.prompt.slice(0, 140)}</strong></div><div className="job-id-row"><span>Job ID</span><code title={job.id}>{job.id}</code><button type="button" className="icon-button small" onClick={() => copyJobId(job.id)} title="复制 Job ID" aria-label={`复制 Job ID ${job.id}`}><Copy size={13} /></button></div><p>{job.progress_message}</p><div className="job-meta"><span><WandSparkles size={13} />{job.provider_name}</span><span><Timer size={13} />{formatDuration(job.elapsed_ms)}</span><span>{job.model}</span>{job.reference_asset_id ? <span><ImagePlus size={13} />参考图</span> : null}<span>{formatDate(job.created_at)}</span></div></div>
+      <div className="job-actions">
+        {job.asset_deleted ? <span className="job-deleted-hint" title="对应图片已从图库删除"><Trash2 size={14} />图片已删除</span> : job.asset_id ? <button type="button" className="button small quiet" onClick={() => onOpenAsset(job.asset_id!)}><FileImage size={14} />查看图片</button> : null}
+        <button type="button" className="button small quiet" onClick={() => setLogJobId(logJobId === job.id ? null : job.id)}><Activity size={14} />{logJobId === job.id ? "收起日志" : "查看日志"}</button>
+        {isActive ? <button type="button" className="button small danger" onClick={() => { if (window.confirm("确定停止这个生成任务？已提交到上游的任务可能仍会继续消耗上游资源。")) cancel.mutate(job.id); }} disabled={cancel.isPending}><Square size={14} />停止</button> : null}
+        {job.status === "failed" ? <button type="button" className="button small quiet" onClick={() => retry.mutate(job.id)} disabled={retry.isPending}><RefreshCw size={14} />手动重试</button> : null}
+        {!isActive ? <button type="button" className="button small danger" onClick={() => { if (window.confirm("确定删除这条任务记录？对应图片不会删除。")) remove.mutate(job.id); }} disabled={remove.isPending}><Trash2 size={14} />删除</button> : null}
+      </div>
+      {logJobId === job.id ? <JobLogPanel jobId={job.id} onClose={() => setLogJobId(null)} /> : null}
+    </article>;
+  })}</div> : <div className="job-list"><div className="empty-panel"><ListTodo size={30} /><strong>{jobs.length ? `${statusLabel(jobFilter === "active" ? "running" : jobFilter)}任务为空` : "还没有生成任务"}</strong><span>{jobs.length ? "切换其他状态标签查看任务。" : "去“开始创作”提交第一条 prompt。"}</span></div></div>}</div>;
 }
 
 export default function App() {

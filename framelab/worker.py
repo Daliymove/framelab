@@ -18,7 +18,7 @@ from .db import init_db, make_session_factory
 from .imgbed import ImgBedClient, ImgBedError
 from .models import Asset, GenerationJob, JobEvent, Provider, RemoteObject, utcnow
 from .providers import OpenAIAsyncProvider, ProviderError
-from .runtime import WorkerRuntime
+from .runtime import WORKER_PARENT_PID_ENV, WorkerRuntime
 from .storage import absolute_media_path, create_asset_from_bytes
 
 
@@ -27,6 +27,59 @@ TERMINAL_JOB_STATES = {"succeeded", "failed", "canceled"}
 
 class WorkerAlreadyRunning(RuntimeError):
     pass
+
+
+def _parent_pid() -> int | None:
+    try:
+        value = int(os.environ.get(WORKER_PARENT_PID_ENV, ""))
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
+def _stop_after_parent_exit(worker: "FrameLabWorker", done: threading.Event) -> None:
+    worker.stop()
+    if not done.wait(5.0):
+        # An in-flight provider request may hold the main loop. The launcher is
+        # already gone, so do not leave an orphan worker until its HTTP timeout.
+        os._exit(0)
+
+
+def _parent_watch(worker: "FrameLabWorker", done: threading.Event, parent_pid: int) -> None:
+    """Stop an owned worker when its launcher exits, including a closed Windows console."""
+    if os.name == "nt":
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            kernel32.OpenProcess.restype = wintypes.HANDLE
+            kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+            kernel32.WaitForSingleObject.restype = wintypes.DWORD
+            kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+            handle = kernel32.OpenProcess(0x00100000, False, parent_pid)
+            if handle:
+                try:
+                    while not done.is_set():
+                        result = kernel32.WaitForSingleObject(handle, 1000)
+                        if result in (0, 0xFFFFFFFF):
+                            _stop_after_parent_exit(worker, done)
+                            return
+                finally:
+                    kernel32.CloseHandle(handle)
+                return
+        except (OSError, AttributeError):
+            pass
+
+    while not done.wait(1.0):
+        try:
+            os.kill(parent_pid, 0)
+        except PermissionError:
+            continue
+        except OSError:
+            _stop_after_parent_exit(worker, done)
+            return
 
 
 @contextmanager
@@ -69,6 +122,13 @@ def _single_worker_lock(data_dir: Path):
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+def _json_load(value: str, fallback: Any = None) -> Any:
+    try:
+        return json.loads(value)
+    except (TypeError, ValueError):
+        return fallback
 
 
 def _event(session, job_id: str, event_type: str, message: str, payload: Any = None) -> None:
@@ -193,19 +253,38 @@ class FrameLabWorker:
 
             with self.session_factory() as session:
                 job = session.get(GenerationJob, job_id)
-                if job is None:
+                if job is None or job.status in TERMINAL_JOB_STATES:
                     return
-                if not job.upstream_task_id:
-                    submitted = client.submit(job, reference_image=reference_image)
-                    job.upstream_task_id = submitted.task_id
-                    job.submitted_at = utcnow()
-                    job.status = "submitted"
-                    job.progress_message = f"已提交 provider 任务：{submitted.task_id}"
-                    job.request_json = _json(submitted.request)
-                    _event(session, job.id, "submitted", job.progress_message, submitted.response)
-                    session.commit()
-                else:
-                    task_id = job.upstream_task_id
+                task_id = job.upstream_task_id
+                session.expunge(job)
+
+            if not task_id:
+                submitted = client.submit(job, reference_image=reference_image)
+                with self.session_factory() as session:
+                    current = session.get(GenerationJob, job_id)
+                    if current is None:
+                        return
+                    if current.status in TERMINAL_JOB_STATES:
+                        if current.status == "canceled":
+                            current.upstream_task_id = submitted.task_id
+                            current.submitted_at = utcnow()
+                            current.request_json = _json(submitted.request)
+                            _event(
+                                session,
+                                current.id,
+                                "submitted_after_cancel",
+                                "provider 任务已提交，但本地任务已停止",
+                                submitted.response,
+                            )
+                            session.commit()
+                        return
+                    current.upstream_task_id = submitted.task_id
+                    current.submitted_at = utcnow()
+                    current.status = "submitted"
+                    current.progress_message = f"已提交 provider 任务：{submitted.task_id}"
+                    current.request_json = _json(submitted.request)
+                    _event(session, current.id, "submitted", current.progress_message, submitted.response)
+                    task_id = current.upstream_task_id
                     session.commit()
 
             with self.session_factory() as session:
@@ -215,27 +294,39 @@ class FrameLabWorker:
                 task_id = job.upstream_task_id
                 started_at = job.started_at or utcnow()
                 deadline = time.monotonic() + max(1, job.timeout_seconds)
+                request_snapshot = _json_load(job.request_json, {})
+                submit_endpoint = request_snapshot.get("endpoint") if isinstance(request_snapshot, dict) else None
                 # A task recovered after a restart still gets the remaining wall-clock budget.
                 if job.started_at:
                     elapsed = (utcnow() - started_at).total_seconds()
                     deadline = time.monotonic() + max(1, job.timeout_seconds - elapsed)
 
-            def on_poll(status: str, _payload: Any) -> None:
+            last_poll_state: str | None = None
+
+            def on_poll(status: str, payload: Any) -> None:
+                nonlocal last_poll_state
+                poll_state = status or "processing"
                 with self.session_factory() as progress_session:
                     current = progress_session.get(GenerationJob, job_id)
                     if current is not None and current.status not in TERMINAL_JOB_STATES:
                         current.status = "running"
                         current.progress_message = (
                             "provider 查询连接中断，正在继续等待原任务"
-                            if status == "reconnecting"
-                            else f"provider 状态：{status or 'processing'}"
+                            if poll_state == "reconnecting"
+                            else f"provider 状态：{poll_state}"
                         )
+                        if poll_state != last_poll_state:
+                            _event(progress_session, job_id, "poll", current.progress_message, payload)
+                            last_poll_state = poll_state
                         progress_session.commit()
 
-            result = client.poll_until_done(task_id, deadline, on_poll=on_poll)
+            if submit_endpoint:
+                result = client.poll_until_done(task_id, deadline, on_poll=on_poll, submit_endpoint=submit_endpoint)
+            else:
+                result = client.poll_until_done(task_id, deadline, on_poll=on_poll)
             with self.session_factory() as session:
                 job = session.get(GenerationJob, job_id)
-                if job is None:
+                if job is None or job.status in TERMINAL_JOB_STATES:
                     return
                 asset, _created = create_asset_from_bytes(
                     session,
@@ -373,11 +464,27 @@ def main() -> None:
         with _single_worker_lock(settings.data_dir):
             runtime = WorkerRuntime(settings)
             worker = FrameLabWorker(settings)
+            parent_done = threading.Event()
+            parent_thread: threading.Thread | None = None
+            parent_pid = _parent_pid()
+            if parent_pid is not None:
+                parent_thread = threading.Thread(
+                    target=_parent_watch,
+                    args=(worker, parent_done, parent_pid),
+                    name="framelab-worker-parent-watch",
+                    daemon=True,
+                )
+                parent_thread.start()
             for signal_name in ("SIGINT", "SIGTERM"):
                 signal_number = getattr(signal, signal_name, None)
                 if signal_number is not None:
                     signal.signal(signal_number, lambda *_args: worker.stop())
-            worker.run_forever(runtime=runtime)
+            try:
+                worker.run_forever(runtime=runtime)
+            finally:
+                parent_done.set()
+                if parent_thread is not None:
+                    parent_thread.join(timeout=2.0)
     except WorkerAlreadyRunning as exc:
         print(exc)
 

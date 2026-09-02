@@ -67,7 +67,7 @@ def init_db(session_factory, settings: Settings) -> None:
 
 
 def _ensure_generation_job_reference_column(engine) -> None:
-    """Add the reference-image field to libraries created before this feature."""
+    """Add generation-job fields to libraries created before these features."""
     with engine.begin() as connection:
         columns = {
             row[1]
@@ -78,6 +78,14 @@ def _ensure_generation_job_reference_column(engine) -> None:
         if "reference_asset_id" not in columns:
             connection.exec_driver_sql(
                 "ALTER TABLE generation_jobs ADD COLUMN reference_asset_id VARCHAR(36)"
+            )
+        if "endpoint_override" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE generation_jobs ADD COLUMN endpoint_override TEXT"
+            )
+        if "extra_params_json" not in columns:
+            connection.exec_driver_sql(
+                "ALTER TABLE generation_jobs ADD COLUMN extra_params_json TEXT NOT NULL DEFAULT '{}'"
             )
         connection.exec_driver_sql(
             "CREATE INDEX IF NOT EXISTS ix_generation_jobs_reference_asset_id "

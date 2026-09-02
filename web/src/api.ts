@@ -66,12 +66,18 @@ export function getJobs() {
   return request<Job[]>("/api/generation/jobs?limit=80", { cache: "no-store" });
 }
 
+export function getJob(id: string) {
+  return request<Job>(`/api/generation/jobs/${id}`, { cache: "no-store" });
+}
+
 export function createJob(payload: {
   prompt: string;
   model: string;
   size: string;
   quality: string;
   timeout: number;
+  endpoint?: string;
+  extra_params?: Record<string, unknown>;
   provider_id?: string;
   parent_job_id?: string;
   reference_asset_id?: string;
@@ -86,6 +92,14 @@ export function createJob(payload: {
 
 export function retryJob(id: string) {
   return request<Job>(`/api/generation/jobs/${id}/retry`, { method: "POST" });
+}
+
+export function cancelJob(id: string) {
+  return request<Job>(`/api/generation/jobs/${id}/cancel`, { method: "POST" });
+}
+
+export function deleteJob(id: string) {
+  return request<{ ok: boolean; id: string }>(`/api/generation/jobs/${id}`, { method: "DELETE" });
 }
 
 export function updateAsset(id: string, payload: Partial<Pick<Asset, "title" | "notes" | "prompt_override" | "sync_enabled">>) {

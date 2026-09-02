@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 from .config import Settings, persist_media_dir, public_url
 from .db import init_db, make_session_factory
 from .models import Asset, AssetTag, AssetVariant, GenerationJob, JobEvent, Provider, RemoteObject, Tag, utcnow
-from .runtime import list_workers, request_worker_stop
+from .providers import normalize_endpoint, validate_extra_params
+from .runtime import WORKER_PARENT_PID_ENV, list_workers, request_worker_stop
 from .storage import absolute_media_path, create_asset_from_bytes, get_variant, media_reference
 
 
@@ -35,6 +36,8 @@ class GenerateRequest(BaseModel):
     quality: str = Field(default="high", max_length=30)
     timeout: int = Field(default=600, ge=30, le=1800)
     provider_id: str | None = None
+    endpoint: str | None = Field(default=None, max_length=2000)
+    extra_params: dict[str, Any] = Field(default_factory=dict)
     parent_job_id: str | None = None
     reference_asset_id: str | None = Field(default=None, max_length=36)
     sync_enabled: bool = True
@@ -92,6 +95,13 @@ def _json_load(value: str, fallback: Any = None) -> Any:
         return json.loads(value)
     except (TypeError, ValueError):
         return fallback
+
+
+def _request_params(value: dict[str, Any]) -> dict[str, Any]:
+    try:
+        return validate_extra_params(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _parse_tags(value: str | None) -> list[str]:
@@ -228,12 +238,14 @@ def _job_payload(session: Session, job: GenerationJob, *, include_events: bool =
         "provider_id": job.provider_id,
         "provider_name": job.provider_name_snapshot,
         "provider_url": job.provider_url_snapshot,
+        "endpoint": job.endpoint_override,
         "model": job.model,
         "prompt": job.prompt,
         "size": job.size,
         "quality": job.quality,
         "timeout_seconds": job.timeout_seconds,
         "sync_enabled": job.sync_enabled,
+        "extra_params": _json_load(job.extra_params_json, {}),
         "status": job.status,
         "progress_message": job.progress_message,
         "upstream_task_id": job.upstream_task_id,
@@ -383,6 +395,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
         yield
+        for worker in list_workers(settings):
+            if worker["status"] == "running":
+                request_worker_stop(settings, worker["pid"])
         session_factory.kw["bind"].dispose()
 
     app = FastAPI(title="FrameLab", version="0.1.0", lifespan=lifespan)
@@ -408,6 +423,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if active:
             return {"started": False, "message": "已有 worker 正在运行。", "worker": active[0]}
         creation_flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        worker_env = os.environ.copy()
+        worker_env[WORKER_PARENT_PID_ENV] = str(os.getpid())
         process = subprocess.Popen(
             [sys.executable, "-m", "framelab.worker"],
             cwd=str(settings.frontend_dist.parent.parent),
@@ -415,6 +432,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=creation_flags,
+            env=worker_env,
         )
         return {"started": True, "pid": process.pid}
 
@@ -777,6 +795,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise HTTPException(status_code=400, detail="不支持的图片尺寸。")
         if payload.quality not in {"low", "medium", "high", "auto"}:
             raise HTTPException(status_code=400, detail="不支持的图片质量。")
+        try:
+            endpoint = normalize_endpoint(payload.endpoint)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        extra_params = _request_params(payload.extra_params)
         with session_factory() as session:
             provider_id = payload.provider_id or settings.image_provider_id
             provider = session.get(Provider, provider_id)
@@ -803,6 +826,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider_id=provider.id,
                 provider_name_snapshot=provider.name,
                 provider_url_snapshot=public_url(provider.base_url),
+                endpoint_override=endpoint or None,
                 reference_asset_id=reference_asset.id if reference_asset else None,
                 model=payload.model,
                 prompt=payload.prompt.strip(),
@@ -810,6 +834,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 quality=payload.quality,
                 timeout_seconds=payload.timeout,
                 sync_enabled=payload.sync_enabled,
+                extra_params_json=json.dumps(extra_params, ensure_ascii=False, separators=(",", ":")),
                 status="queued",
                 progress_message="已加入本地任务队列",
             )
@@ -862,6 +887,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider_id=original.provider_id,
                 provider_name_snapshot=original.provider_name_snapshot,
                 provider_url_snapshot=original.provider_url_snapshot,
+                endpoint_override=original.endpoint_override,
                 reference_asset_id=original.reference_asset_id,
                 model=original.model,
                 prompt=original.prompt,
@@ -870,6 +896,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 response_format=original.response_format,
                 timeout_seconds=original.timeout_seconds,
                 sync_enabled=original.sync_enabled,
+                extra_params_json=original.extra_params_json,
                 status="queued",
                 upstream_task_id=resume_task_id,
                 submitted_at=original.submitted_at if resume_task_id else None,
@@ -896,6 +923,55 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
             session.commit()
             return _job_payload(session, job)
+
+    @app.post("/api/generation/jobs/{job_id}/cancel")
+    def cancel_generation_job(job_id: str):
+        with session_factory() as session:
+            job = session.get(GenerationJob, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="任务不存在。")
+            if job.status == "canceled":
+                return _job_payload(session, job)
+            if job.status in TERMINAL_STATES:
+                raise HTTPException(status_code=409, detail="只有处理中的任务可以停止。")
+
+            job.status = "canceled"
+            job.progress_message = "已手动停止本地任务"
+            job.error_message = ""
+            job.completed_at = utcnow()
+            if job.started_at is not None:
+                job.elapsed_ms = max(0, int((job.completed_at - job.started_at).total_seconds() * 1000))
+            from .worker import _event
+
+            _event(
+                session,
+                job.id,
+                "canceled",
+                job.progress_message,
+                {
+                    "upstream_task_id": job.upstream_task_id,
+                    "local_only": bool(job.upstream_task_id),
+                },
+            )
+            session.commit()
+            return _job_payload(session, job)
+
+    @app.delete("/api/generation/jobs/{job_id}")
+    def delete_generation_job(job_id: str):
+        with session_factory() as session:
+            job = session.get(GenerationJob, job_id)
+            if job is None:
+                raise HTTPException(status_code=404, detail="任务不存在。")
+            if job.status not in TERMINAL_STATES:
+                raise HTTPException(status_code=409, detail="只有已完成、失败或已取消的任务可以删除。")
+
+            # 保留重试任务，只解除它们对被删历史任务的父子引用。
+            session.query(GenerationJob).filter(GenerationJob.parent_job_id == job_id).update(
+                {GenerationJob.parent_job_id: None}, synchronize_session=False
+            )
+            session.delete(job)
+            session.commit()
+            return {"ok": True, "id": job_id}
 
     @app.get("/api/generation/jobs/{job_id}/events")
     def generation_events(job_id: str):

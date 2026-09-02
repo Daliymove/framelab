@@ -4,6 +4,8 @@ import http.server
 import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import threading
 import urllib.parse
@@ -16,7 +18,9 @@ from PIL import Image
 from framelab.api import create_app
 from framelab.config import Settings
 from framelab.imgbed import ImgBedClient
-from framelab.worker import FrameLabWorker
+from framelab.models import GenerationJob, JobEvent
+from framelab.providers import OpenAIAsyncProvider, ProviderResult, SubmittedTask
+from framelab.worker import FrameLabWorker, _parent_watch
 
 
 def png_bytes(color=(26, 122, 85)) -> bytes:
@@ -32,6 +36,7 @@ class FakeImageApiHandler(http.server.BaseHTTPRequestHandler):
     last_path = ""
     last_content_type = ""
     last_body = b""
+    last_json = {}
 
     def log_message(self, fmt, *args):
         pass
@@ -50,9 +55,17 @@ class FakeImageApiHandler(http.server.BaseHTTPRequestHandler):
         type(self).last_path = self.path
         type(self).last_content_type = self.headers.get("Content-Type", "")
         type(self).last_body = body
-        if self.path in {"/v1/images/generations/async", "/v1/images/edits/async"}:
+        try:
+            type(self).last_json = json.loads(body) if "application/json" in self.headers.get("Content-Type", "") else {}
+        except ValueError:
+            type(self).last_json = {}
+        if self.path in {"/v1/images/generations/async", "/v1/images/edits/async", "/v1/custom/generate"}:
             type(self).submissions += 1
             self.send_json({"task_id": "task-123", "status": "queued"})
+            return
+        if self.path == "/v1/images/generations":
+            type(self).submissions += 1
+            self.send_json({"id": "img-123", "status": "pending"})
             return
         self.send_error(404)
 
@@ -61,6 +74,16 @@ class FakeImageApiHandler(http.server.BaseHTTPRequestHandler):
             type(self).polls += 1
             image_url = f"http://127.0.0.1:{self.server.server_port}/result.png"
             self.send_json({"task_id": "task-123", "status": "succeeded", "result": {"data": [{"url": image_url}]}})
+            return
+        if self.path == "/v1/images/img-123":
+            self.send_json({"id": "img-123", "status": "completed", "content_url": "/v1/images/img-123/content"})
+            return
+        if self.path == "/v1/images/img-123/content":
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(self.image)))
+            self.end_headers()
+            self.wfile.write(self.image)
             return
         if self.path == "/result.png":
             self.send_response(200)
@@ -139,6 +162,40 @@ def test_upload_persists_original_metadata_and_tags():
             ).json()
             assert duplicate["created"] is False
             assert duplicate["asset"]["id"] == asset["id"]
+
+
+def test_api_started_worker_receives_api_parent_pid():
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = make_settings(Path(temporary))
+        with TestClient(create_app(settings)) as client, mock.patch("framelab.api.subprocess.Popen") as popen:
+            popen.return_value.pid = 4321
+
+            response = client.post("/api/runtime/workers")
+
+            assert response.status_code == 202
+            assert popen.call_args.kwargs["env"]["FRAMELAB_WORKER_PARENT_PID"] == str(os.getpid())
+
+
+def test_worker_parent_watch_stops_when_launcher_exits():
+    class StopProbe:
+        def __init__(self, done):
+            self.done = done
+            self.stopped = False
+
+        def stop(self):
+            self.stopped = True
+            self.done.set()
+
+    done = threading.Event()
+    launcher = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(0.2)"])
+    probe = StopProbe(done)
+    watcher = threading.Thread(target=_parent_watch, args=(probe, done, launcher.pid))
+    watcher.start()
+    launcher.wait(timeout=3)
+    watcher.join(timeout=3)
+
+    assert probe.stopped is True
+    assert not watcher.is_alive()
 
 
 def test_delete_asset_hides_asset_and_blocks_file():
@@ -273,6 +330,260 @@ def test_generation_worker_submits_once_and_records_trace():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_generation_job_can_override_endpoint_and_add_extra_params():
+    FakeImageApiHandler.submissions = 0
+    FakeImageApiHandler.polls = 0
+    FakeImageApiHandler.last_path = ""
+    FakeImageApiHandler.last_json = {}
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeImageApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ,
+            {
+                "FRAMELAB_DATA_DIR": temporary,
+                "CODEX_IMAGE_API_KEY": "test-key",
+                "CODEX_IMAGE_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                "CODEX_IMAGE_POLL_INTERVAL": "0.01",
+                "FRAMELAB_IMGBED_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            settings = Settings.from_env()
+            endpoint = f"http://127.0.0.1:{server.server_port}/v1/custom/generate"
+            with TestClient(create_app(settings)) as client:
+                created = client.post(
+                    "/api/generation/jobs",
+                    json={
+                        "prompt": "自定义请求地址测试",
+                        "model": "gpt-image-2",
+                        "size": "auto",
+                        "quality": "high",
+                        "timeout": 120,
+                        "endpoint": endpoint,
+                        "extra_params": {"async": True, "output_format": "png"},
+                        "sync_enabled": False,
+                    },
+                )
+                assert created.status_code == 202
+                assert created.json()["endpoint"] == endpoint
+                assert created.json()["extra_params"] == {"async": True, "output_format": "png"}
+                job_id = created.json()["id"]
+
+                worker = FrameLabWorker(settings)
+                try:
+                    assert worker.run_once() is True
+                finally:
+                    worker.close()
+
+                job = client.get(f"/api/generation/jobs/{job_id}").json()
+                assert job["status"] == "succeeded"
+                assert job["request"]["endpoint"] == endpoint
+                assert job["request"]["async"] is True
+                assert job["request"]["output_format"] == "png"
+                assert FakeImageApiHandler.last_path == "/v1/custom/generate"
+                assert FakeImageApiHandler.last_json["async"] is True
+                assert FakeImageApiHandler.last_json["output_format"] == "png"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_generation_job_rejects_invalid_endpoint_and_reserved_extra_param():
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = make_settings(Path(temporary))
+        with TestClient(create_app(settings)) as client:
+            base_payload = {
+                "prompt": "参数校验测试",
+                "model": "gpt-image-2",
+                "size": "auto",
+                "quality": "high",
+                "timeout": 120,
+                "sync_enabled": False,
+            }
+            invalid_endpoint = client.post(
+                "/api/generation/jobs",
+                json={**base_payload, "endpoint": "/v1/images/generations"},
+            )
+            assert invalid_endpoint.status_code == 400
+
+            reserved_param = client.post(
+                "/api/generation/jobs",
+                json={**base_payload, "extra_params": {"prompt": "不能覆盖"}},
+            )
+            assert reserved_param.status_code == 400
+
+
+def test_documented_async_endpoint_polls_image_and_downloads_content():
+    FakeImageApiHandler.submissions = 0
+    FakeImageApiHandler.polls = 0
+    FakeImageApiHandler.last_path = ""
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeImageApiHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+            os.environ,
+            {
+                "FRAMELAB_DATA_DIR": temporary,
+                "CODEX_IMAGE_API_KEY": "test-key",
+                "CODEX_IMAGE_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                "CODEX_IMAGE_POLL_INTERVAL": "0.01",
+                "FRAMELAB_IMGBED_ENABLED": "false",
+            },
+            clear=False,
+        ):
+            settings = Settings.from_env()
+            endpoint = f"http://127.0.0.1:{server.server_port}/v1/images/generations"
+            with TestClient(create_app(settings)) as client:
+                created = client.post(
+                    "/api/generation/jobs",
+                    json={
+                        "prompt": "文档协议测试",
+                        "model": "gpt-image-2",
+                        "size": "1024x1024",
+                        "quality": "high",
+                        "timeout": 120,
+                        "endpoint": endpoint,
+                        "extra_params": {"async": True},
+                        "sync_enabled": False,
+                    },
+                )
+                assert created.status_code == 202
+                job_id = created.json()["id"]
+
+                worker = FrameLabWorker(settings)
+                try:
+                    assert worker.run_once() is True
+                finally:
+                    worker.close()
+
+                job = client.get(f"/api/generation/jobs/{job_id}").json()
+                assert job["status"] == "succeeded"
+                assert job["upstream_task_id"] == "img-123"
+                assert FakeImageApiHandler.submissions == 1
+                assert FakeImageApiHandler.polls == 0
+                asset = client.get(f"/api/assets/{job['asset_id']}").json()
+                assert asset["size_bytes"] == len(png_bytes())
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+def test_cancel_queued_generation_job_records_event_and_worker_skips_it():
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = make_settings(Path(temporary))
+        with TestClient(create_app(settings)) as client:
+            created = client.post(
+                "/api/generation/jobs",
+                json={
+                    "prompt": "停止队列任务测试",
+                    "model": "gpt-image-2",
+                    "size": "auto",
+                    "quality": "high",
+                    "timeout": 120,
+                    "sync_enabled": False,
+                },
+            ).json()
+            job_id = created["id"]
+
+            response = client.post(f"/api/generation/jobs/{job_id}/cancel")
+
+            assert response.status_code == 200
+            assert response.json()["status"] == "canceled"
+            detail = client.get(f"/api/generation/jobs/{job_id}").json()
+            assert detail["progress_message"] == "已手动停止本地任务"
+            assert detail["events"][-1]["type"] == "canceled"
+            assert detail["events"][-1]["payload"] == {
+                "upstream_task_id": None,
+                "local_only": False,
+            }
+
+            worker = FrameLabWorker(settings)
+            try:
+                assert worker.run_once() is False
+            finally:
+                worker.close()
+
+
+def test_generation_job_delete_requires_terminal_state_and_cascades_events():
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = make_settings(Path(temporary))
+        with TestClient(create_app(settings)) as client:
+            created = client.post(
+                "/api/generation/jobs",
+                json={
+                    "prompt": "删除任务测试",
+                    "model": "gpt-image-2",
+                    "size": "auto",
+                    "quality": "high",
+                    "timeout": 120,
+                    "sync_enabled": False,
+                },
+            ).json()
+            job_id = created["id"]
+
+            assert client.delete(f"/api/generation/jobs/{job_id}").status_code == 409
+            canceled = client.post(f"/api/generation/jobs/{job_id}/cancel").json()
+            event_id = client.get(f"/api/generation/jobs/{job_id}").json()["events"][0]["id"]
+
+            response = client.delete(f"/api/generation/jobs/{job_id}")
+
+            assert response.status_code == 200
+            assert response.json() == {"ok": True, "id": job_id}
+            assert client.get(f"/api/generation/jobs/{job_id}").status_code == 404
+            with client.app.state.session_factory() as session:
+                assert session.get(JobEvent, event_id) is None
+            assert canceled["status"] == "canceled"
+
+
+def test_canceled_job_is_not_saved_after_provider_returns_result():
+    with tempfile.TemporaryDirectory() as temporary:
+        settings = make_settings(Path(temporary))
+        with TestClient(create_app(settings)) as client:
+            created = client.post(
+                "/api/generation/jobs",
+                json={
+                    "prompt": "取消竞态测试",
+                    "model": "gpt-image-2",
+                    "size": "auto",
+                    "quality": "high",
+                    "timeout": 120,
+                    "sync_enabled": False,
+                },
+            ).json()
+            job_id = created["id"]
+            worker = FrameLabWorker(settings)
+
+            def return_after_cancel(_task_id, _deadline, on_poll=None):
+                with worker.session_factory() as session:
+                    job = session.get(GenerationJob, job_id)
+                    job.status = "canceled"
+                    session.commit()
+                return ProviderResult(image_bytes=png_bytes(), suffix=".png", response={"status": "completed"})
+
+            try:
+                with mock.patch.object(
+                    OpenAIAsyncProvider,
+                    "submit",
+                    return_value=SubmittedTask(task_id="task-canceled", response={}, request={}),
+                ), mock.patch.object(
+                    OpenAIAsyncProvider,
+                    "poll_until_done",
+                    side_effect=return_after_cancel,
+                ):
+                    assert worker.run_once() is True
+            finally:
+                worker.close()
+
+            job = client.get(f"/api/generation/jobs/{job_id}").json()
+            assert job["status"] == "canceled"
+            assert job["asset_id"] is None
 
 
 def test_deleted_asset_job_is_marked_in_queue_payload():

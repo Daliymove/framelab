@@ -79,12 +79,14 @@ export interface Job {
   provider_id: string;
   provider_name: string;
   provider_url: string;
+  endpoint: string | null;
   model: string;
   prompt: string;
   size: string;
   quality: string;
   timeout_seconds: number;
   sync_enabled: boolean;
+  extra_params: Record<string, unknown>;
   status: "queued" | "submitted" | "running" | "succeeded" | "failed" | "canceled";
   progress_message: string;
   upstream_task_id: string | null;
