@@ -46,8 +46,8 @@ export function getTags() {
   return request<Tag[]>("/api/tags", { cache: "no-store" });
 }
 
-export function getAssets(params: { q?: string; source?: string; sync_status?: string; page?: number }) {
-  const search = new URLSearchParams({ page_size: "40" });
+export function getAssets(params: { q?: string; source?: string; sync_status?: string; page?: number; page_size?: number }) {
+  const search = new URLSearchParams({ page_size: String(params.page_size || 40) });
   Object.entries(params).forEach(([key, value]) => {
     if (value && value !== "all") search.set(key, String(value));
   });

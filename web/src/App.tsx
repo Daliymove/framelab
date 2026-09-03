@@ -418,8 +418,10 @@ function useGenerateDraftState<T>(key: string, initialValue: T) {
   return [value, setValue] as const;
 }
 
+const DEFAULT_GENERATE_PROMPT = "把参考图美化成一张更精致的作品，保留主体和核心构图，优化光线、材质、色彩与细节，画面干净，无 logo 和水印。";
+
 function GenerateView({ config, providers, onCreated, setNotice }: { config?: Config; providers: Provider[]; onCreated: () => void; setNotice: (value: string) => void }) {
-  const [prompt, setPrompt] = useGenerateDraftState("prompt", "把参考图美化成一张更精致的作品，保留主体和核心构图，优化光线、材质、色彩与细节，画面干净，无 logo 和水印。");
+  const [prompt, setPrompt] = useGenerateDraftState("prompt", DEFAULT_GENERATE_PROMPT);
   const [model, setModel] = useGenerateDraftState("model", "gpt-image-2");
   const [size, setSize] = useGenerateDraftState("size", "auto");
   const [quality, setQuality] = useGenerateDraftState("quality", "high");
@@ -430,11 +432,25 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
   const [syncEnabled, setSyncEnabled] = useGenerateDraftState("sync-enabled", true);
   const [parentJobId, setParentJobId] = useGenerateDraftState("parent-job", "");
   const [referenceAsset, setReferenceAsset] = useGenerateDraftState<Asset | null>("reference-asset", null);
+  const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const referenceFileInput = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
+  const chosenProvider = providers.find((item) => item.id === (providerId || config?.provider.id));
+  const defaultEndpoint = defaultGenerationEndpoint(chosenProvider?.base_url || config?.provider.base_url, Boolean(referenceAsset));
+  const automaticEndpoints = [
+    defaultGenerationEndpoint(chosenProvider?.base_url || config?.provider.base_url, false),
+    defaultGenerationEndpoint(chosenProvider?.base_url || config?.provider.base_url, true),
+  ];
+  const endpointOverride = automaticEndpoints.includes(endpoint.trim()) ? "" : endpoint.trim();
+  const clearAutomaticEndpointOverride = (hasReference: boolean) => {
+    const currentEndpoint = endpoint.trim();
+    const baseUrl = chosenProvider?.base_url || config?.provider.base_url;
+    if (currentEndpoint && currentEndpoint === defaultGenerationEndpoint(baseUrl, !hasReference)) setEndpoint("");
+  };
   const referenceUpload = useMutation({
     mutationFn: (file: File) => uploadAsset(file, { title: "参考图", notes: "", tags: "参考图", sync_enabled: false }),
     onSuccess: (result) => {
+      clearAutomaticEndpointOverride(true);
       setReferenceAsset(result.asset);
       queryClient.invalidateQueries({ queryKey: ["assets"] });
       queryClient.invalidateQueries({ queryKey: ["stats"] });
@@ -444,11 +460,11 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
   });
   const extraParamsResult = parseExtraParams(extraParamsText);
   const mutation = useMutation({
-    mutationFn: () => createJob({ prompt, model, size, quality, timeout, endpoint: endpoint.trim() || undefined, extra_params: extraParamsResult.params, provider_id: providerId || undefined, parent_job_id: parentJobId || undefined, reference_asset_id: referenceAsset?.id || undefined, sync_enabled: syncEnabled }),
+    mutationFn: () => createJob({ prompt, model, size: size.trim().toLowerCase(), quality, timeout, endpoint: endpointOverride || undefined, extra_params: extraParamsResult.params, provider_id: providerId || undefined, parent_job_id: parentJobId || undefined, reference_asset_id: referenceAsset?.id || undefined, sync_enabled: syncEnabled }),
     onSuccess: (job) => { setNotice(`任务 ${job.id.slice(0, 8)} 已加入队列`); onCreated(); },
   });
-  const chosenProvider = providers.find((item) => item.id === (providerId || config?.provider.id));
-  const effectiveEndpoint = endpoint.trim() || defaultGenerationEndpoint(chosenProvider?.base_url || config?.provider.base_url, Boolean(referenceAsset));
+  const effectiveEndpoint = endpointOverride || defaultEndpoint;
+  const displayedEndpoint = effectiveEndpoint;
   const requestPreview = useMemo(() => ({
     method: "POST",
     endpoint: effectiveEndpoint || "未配置",
@@ -475,15 +491,33 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
     event.target.value = "";
   };
   const removeReference = () => {
+    clearAutomaticEndpointOverride(false);
     setReferenceAsset(null);
     if (referenceFileInput.current) referenceFileInput.current.value = "";
+  };
+  const selectReference = (asset: Asset) => {
+    clearAutomaticEndpointOverride(true);
+    setReferenceAsset(asset);
+    setReferencePickerOpen(false);
+    setNotice("已选择图库图片作为参考图");
+  };
+  const resetRequestDefaults = () => {
+    setProviderId("");
+    setEndpoint("");
+    setModel("gpt-image-2");
+    setSize("auto");
+    setQuality("high");
+    setTimeoutValue(600);
+    setExtraParamsText("");
+    setNotice("请求参数已恢复默认");
   };
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!prompt.trim()) return;
     if (referenceUpload.isPending) { setNotice("参考图仍在上传，请稍候"); return; }
     if (timeout < 30 || timeout > 1800) { setNotice("最长等待必须在 30 到 1800 秒之间"); return; }
-    if (endpointError(endpoint)) { setNotice(endpointError(endpoint)); return; }
+    if (endpointError(displayedEndpoint)) { setNotice(endpointError(displayedEndpoint)); return; }
+    if (sizeError(size)) { setNotice(sizeError(size)); return; }
     if (extraParamsResult.error) { setNotice(extraParamsResult.error); return; }
     mutation.mutate();
   };
@@ -498,9 +532,12 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
             <div className="reference-section-head">
               <div><div className="section-label"><ImagePlus size={14} />参考图 <em>可选</em></div><p className="reference-copy">有参考图时会调用 edits 接口；没有参考图则按纯 prompt 生图。</p></div>
               <input ref={referenceFileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={handleReferenceFile} />
-              <button type="button" className="button small quiet" onClick={() => referenceFileInput.current?.click()} disabled={referenceUpload.isPending}><Upload size={14} />{referenceUpload.isPending ? "上传中" : referenceAsset ? "更换参考图" : "上传参考图"}</button>
+              <div className="reference-actions">
+                <button type="button" className="button small quiet" onClick={() => setReferencePickerOpen(true)} disabled={referenceUpload.isPending}><Images size={14} />从图库选择</button>
+                <button type="button" className="button small quiet" onClick={() => referenceFileInput.current?.click()} disabled={referenceUpload.isPending}><Upload size={14} />{referenceUpload.isPending ? "上传中" : referenceAsset ? "更换参考图" : "上传参考图"}</button>
+              </div>
             </div>
-            {referenceAsset ? <div className="reference-preview"><img src={referenceAsset.preview_url} alt={referenceAsset.title || referenceAsset.original_filename} /><div className="reference-meta"><strong>{referenceAsset.original_filename}</strong><span>{referenceAsset.width && referenceAsset.height ? `${referenceAsset.width} × ${referenceAsset.height}` : "图片"} · 任务提交时按原图发送</span><button type="button" className="text-button" onClick={removeReference}><X size={13} />移除参考图</button></div></div> : <button type="button" className="reference-dropzone" onClick={() => referenceFileInput.current?.click()}><ImagePlus size={24} /><strong>选择一张参考图</strong><span>PNG、JPEG、WebP 或 GIF，异步改图请求上限 15 MB</span></button>}
+            {referenceAsset ? <div className="reference-preview"><img src={referenceAsset.preview_url} alt={referenceAsset.title || referenceAsset.original_filename} /><div className="reference-meta"><strong>{referenceAsset.title || referenceAsset.original_filename}</strong><span>{referenceAsset.width && referenceAsset.height ? `${referenceAsset.width} × ${referenceAsset.height}` : "图片"} · {referenceAsset.source === "upload" ? "图库原图" : "生成图原图"} · 任务提交时按原图发送</span><button type="button" className="text-button" onClick={removeReference}><X size={13} />移除参考图</button></div></div> : <div className="reference-empty-actions"><button type="button" className="reference-dropzone" onClick={() => referenceFileInput.current?.click()}><ImagePlus size={24} /><strong>上传一张新参考图</strong><span>PNG、JPEG、WebP 或 GIF，异步改图请求上限 15 MB</span></button><button type="button" className="reference-library-dropzone" onClick={() => setReferencePickerOpen(true)}><Images size={24} /><strong>使用图库中的图片</strong><span>从已上传图片中选择，不需要重复上传</span></button></div>}
             {referenceUpload.error ? <div className="inline-error"><AlertTriangle size={15} />{referenceUpload.error instanceof Error ? referenceUpload.error.message : "参考图上传失败"}</div> : null}
           </section>
           <label className="input-label large">Prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={32000} rows={15} placeholder="描述你希望如何修改参考图..." /><span className="field-foot"><span>{prompt.length.toLocaleString()} / 32,000</span><span>原文将永久保留</span></span></label>
@@ -509,12 +546,13 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
           {mutation.error ? <div className="inline-error"><AlertTriangle size={15} />{mutation.error.message}</div> : null}
         </section>
         <aside className="generation-options panel">
-          <div className="panel-heading compact"><span className="panel-number">02</span><div><p className="kicker">REQUEST SNAPSHOT</p><h2>请求参数</h2></div></div>
+          <div className="panel-heading compact"><span className="panel-number">02</span><div><p className="kicker">REQUEST SNAPSHOT</p><h2>请求参数</h2></div><button type="button" className="button small quiet reset-button" onClick={resetRequestDefaults} title="恢复请求参数默认值"><RefreshCw size={13} />恢复默认</button></div>
           <label className="input-label">Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.ready ? " · ready" : " · 未配置"}</option>)}</select></label>
-          <label className="input-label">调用地址<div className="endpoint-field"><b>POST</b><input value={endpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="留空按 Provider 自动拼接" spellCheck={false} /></div></label>
-          <p className="field-help">可填完整的 HTTP 地址，例如 https://api.example.com/v1/images/generations。填写后只覆盖本次任务。</p>
-          {endpointError(endpoint) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{endpointError(endpoint)}</div> : null}
-          <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<select value={size} onChange={(event) => setSize(event.target.value)}><option value="auto">Auto</option><option value="1024x1024">1024 × 1024</option><option value="1536x864">1536 × 864</option><option value="864x1536">864 × 1536</option><option value="2048x2048">2048 × 2048</option><option value="2560x1440">2560 × 1440</option><option value="1440x2560">1440 × 2560</option><option value="3840x2160">3840 × 2160</option><option value="2160x3840">2160 × 3840</option><option value="2880x2880">2880 × 2880</option></select></label></div>
+          <label className="input-label">调用地址<div className="endpoint-field"><b>POST</b><input value={displayedEndpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="Provider 未配置 async 地址" spellCheck={false} /></div></label>
+          <p className="field-help">默认显示当前模式的 async 地址；手动修改后只覆盖本次任务。</p>
+          {endpointError(displayedEndpoint) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{endpointError(displayedEndpoint)}</div> : null}
+          <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<div className="size-field"><input list="image-size-suggestions" value={size} onChange={(event) => setSize(event.target.value)} placeholder="例如 1200x800" spellCheck={false} /><datalist id="image-size-suggestions"><option value="auto" /><option value="1024x1024" /><option value="1536x864" /><option value="864x1536" /><option value="2048x2048" /><option value="2560x1440" /><option value="1440x2560" /><option value="3840x2160" /><option value="2160x3840" /><option value="2880x2880" /></datalist></div></label></div>
+          {sizeError(size) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{sizeError(size)}</div> : null}
           <fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset>
           <label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label>
           <label className="input-label extra-params-label">附加参数<textarea value={extraParamsText} onChange={(event) => setExtraParamsText(event.target.value)} rows={7} spellCheck={false} placeholder={'{\n  "async": true\n}'} /></label>
@@ -527,8 +565,31 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
           </section>
         </aside>
       </form>
+      {referencePickerOpen ? <ReferenceAssetPicker onClose={() => setReferencePickerOpen(false)} onSelect={selectReference} /> : null}
     </div>
   );
+}
+
+function ReferenceAssetPicker({ onClose, onSelect }: { onClose: () => void; onSelect: (asset: Asset) => void }) {
+  const [query, setQuery] = useState("");
+  const assets = useQuery({
+    queryKey: ["reference-assets", query],
+    queryFn: () => getAssets({ q: query, source: "upload", page: 1, page_size: 100 }),
+  });
+
+  return <div className="drawer-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}>
+    <aside className="reference-picker-drawer" role="dialog" aria-modal="true" aria-labelledby="reference-picker-title">
+      <div className="drawer-head">
+        <div><p className="kicker">LOCAL ASSET LIBRARY</p><h2 id="reference-picker-title">选择图库参考图</h2></div>
+        <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={18} /></button>
+      </div>
+      <div className="reference-picker-toolbar"><div className="search-box"><Search size={16} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索文件名、标题或备注" /></div><span>{assets.data ? `${assets.data.total} 张已上传图片` : "读取中"}</span></div>
+      {assets.isLoading ? <div className="reference-picker-empty"><LoaderCircle className="spin" /><span>读取图库...</span></div> : null}
+      {assets.error ? <div className="inline-error"><AlertTriangle size={15} />无法读取图库，请稍后重试</div> : null}
+      {assets.data && !assets.data.items.length ? <div className="reference-picker-empty"><Images size={28} /><strong>{query ? "没有匹配的上传图片" : "还没有上传图片"}</strong><span>{query ? "换一个关键词试试。" : "先上传一张图片，它会出现在这里。"}</span></div> : null}
+      {assets.data?.items.length ? <div className="reference-picker-grid">{assets.data.items.map((asset) => <button type="button" className="reference-picker-card" key={asset.id} onClick={() => onSelect(asset)}><span className="reference-picker-image"><img src={asset.thumbnail_url} alt="" /></span><span className="reference-picker-card-meta"><strong>{asset.title || asset.original_filename}</strong><span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "图片"} · {formatDate(asset.created_at)}</span></span><span className="reference-picker-select">选择</span></button>)}</div> : null}
+    </aside>
+  </div>;
 }
 
 function JobLogPanel({ jobId, onClose }: { jobId: string; onClose: () => void }) {
@@ -611,6 +672,14 @@ function endpointError(value: string) {
   } catch {
     return "调用地址必须是完整的 http 或 https URL。";
   }
+}
+
+function sizeError(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "auto") return "";
+  if (!/^[1-9]\d{0,4}x[1-9]\d{0,4}$/.test(normalized)) return "尺寸请输入 auto 或正整数宽x高，例如 1200x800。";
+  const [width, height] = normalized.split("x").map(Number);
+  return width > 0 && height > 0 ? "" : "尺寸的宽度和高度必须大于 0。";
 }
 
 function requestForDisplay(request: Record<string, unknown> | undefined) {

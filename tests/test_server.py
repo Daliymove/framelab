@@ -417,6 +417,13 @@ def test_generation_job_rejects_invalid_endpoint_and_reserved_extra_param():
             )
             assert reserved_param.status_code == 400
 
+            custom_size = client.post(
+                "/api/generation/jobs",
+                json={**base_payload, "size": "1200x800"},
+            )
+            assert custom_size.status_code == 202
+            assert custom_size.json()["size"] == "1200x800"
+
 
 def test_documented_async_endpoint_polls_image_and_downloads_content():
     FakeImageApiHandler.submissions = 0
