@@ -20,30 +20,37 @@ ENV_FILE = APP_DIR / ".env"
 load_dotenv(APP_DIR / ".env", override=True, encoding="utf-8")
 
 
-def persist_media_dir(media_dir: Path, env_path: Path | None = None) -> None:
-    """Persist the image directory while preserving the rest of the env file."""
-    value = str(media_dir)
-    if any(char in value for char in "\x00\r\n"):
-        raise ValueError("图片目录不能包含换行或无效字符。")
+def persist_env_variables(updates: dict[str, str], env_path: Path | None = None) -> None:
+    """Update or append environment variables in .env while preserving the rest of the file."""
+    for key, val in updates.items():
+        if any(char in str(val) for char in "\x00\r\n"):
+            raise ValueError(f"{key} 不能包含换行或无效字符。")
 
     env_path = env_path or ENV_FILE
     existing = env_path.read_text(encoding="utf-8") if env_path.exists() else ""
     lines = existing.splitlines()
-    pattern = re.compile(r"^\s*(?:#\s*)?FRAMELAB_MEDIA_DIR\s*=")
-    replaced = False
-    for index, line in enumerate(lines):
-        if pattern.match(line):
-            lines[index] = f"FRAMELAB_MEDIA_DIR={value}"
-            replaced = True
-            break
 
-    if replaced:
-        content = "\n".join(lines)
-        if existing.endswith(("\n", "\r")):
-            content += "\n"
-    else:
-        separator = "" if not existing or existing.endswith(("\n", "\r")) else "\n"
-        content = f"{existing}{separator}FRAMELAB_MEDIA_DIR={value}\n"
+    for key, val in updates.items():
+        active_pattern = re.compile(rf"^\s*{re.escape(key)}\s*=")
+        comment_pattern = re.compile(rf"^\s*#\s*{re.escape(key)}\s*=")
+
+        active_indices = [i for i, line in enumerate(lines) if active_pattern.match(line)]
+        if active_indices:
+            target_idx = active_indices[-1]
+            lines[target_idx] = f"{key}={val}"
+            for idx in reversed(active_indices[:-1]):
+                lines.pop(idx)
+        else:
+            comment_indices = [i for i, line in enumerate(lines) if comment_pattern.match(line)]
+            if comment_indices:
+                target_idx = comment_indices[-1]
+                lines[target_idx] = f"{key}={val}"
+            else:
+                lines.append(f"{key}={val}")
+
+    content = "\n".join(lines)
+    if existing.endswith(("\n", "\r")) or lines:
+        content += "\n"
 
     env_path.parent.mkdir(parents=True, exist_ok=True)
     handle, temporary_name = tempfile.mkstemp(prefix=f".{env_path.name}.", suffix=".tmp", dir=env_path.parent)
@@ -54,6 +61,31 @@ def persist_media_dir(media_dir: Path, env_path: Path | None = None) -> None:
     finally:
         if os.path.exists(temporary_name):
             os.unlink(temporary_name)
+
+
+def persist_media_dir(media_dir: Path, env_path: Path | None = None) -> None:
+    """Persist the image directory while preserving the rest of the env file."""
+    persist_env_variables({"FRAMELAB_MEDIA_DIR": str(media_dir)}, env_path)
+
+
+def persist_provider_config(
+    base_url: str | None = None,
+    api_key: str | None = None,
+    api_key_env: str = "CODEX_IMAGE_API_KEY",
+    env_path: Path | None = None,
+) -> None:
+    """Persist provider base_url and api_key to .env and sync with os.environ."""
+    updates: dict[str, str] = {}
+    if base_url is not None and base_url.strip():
+        clean_url = base_url.strip().rstrip("/")
+        updates["CODEX_IMAGE_BASE_URL"] = clean_url
+        os.environ["CODEX_IMAGE_BASE_URL"] = clean_url
+    if api_key is not None and api_key.strip():
+        clean_key = api_key.strip()
+        updates[api_key_env] = clean_key
+        os.environ[api_key_env] = clean_key
+    if updates:
+        persist_env_variables(updates, env_path)
 
 
 def _first_env(*names: str, default: str = "") -> str:

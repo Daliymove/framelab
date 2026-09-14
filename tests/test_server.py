@@ -793,3 +793,57 @@ def test_imgbed_upload_uses_documented_auth_and_preserves_original():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+def test_provider_update_and_env_persistence():
+    with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+        os.environ,
+        {
+            "FRAMELAB_DATA_DIR": temporary,
+            "CODEX_IMAGE_API_KEY": "initial-key",
+            "CODEX_IMAGE_BASE_URL": "https://api.initial.com/v1",
+        },
+        clear=False,
+    ):
+        test_env_file = Path(temporary) / ".env"
+        test_env_file.write_text("CODEX_IMAGE_API_KEY=initial-key\nCODEX_IMAGE_BASE_URL=https://api.initial.com/v1\n", encoding="utf-8")
+
+        with mock.patch("framelab.config.ENV_FILE", test_env_file):
+            settings = Settings.from_env()
+            with TestClient(create_app(settings)) as client:
+                providers = client.get("/api/providers").json()
+                assert len(providers) >= 1
+                provider_id = providers[0]["id"]
+                assert providers[0]["base_url"] == "https://api.initial.com/v1"
+                assert providers[0]["ready"] is True
+                assert "api_key" not in providers[0]
+
+                response = client.patch(
+                    f"/api/providers/{provider_id}",
+                    json={
+                        "base_url": "https://api.custom-relay.com/v1",
+                        "api_key": "sk-brand-new-secret",
+                    },
+                )
+                assert response.status_code == 200
+                data = response.json()
+                assert data["id"] == provider_id
+                assert data["base_url"] == "https://api.custom-relay.com/v1"
+                assert data["ready"] is True
+                assert "api_key" not in data
+
+                # Check os.environ updated
+                assert os.environ["CODEX_IMAGE_BASE_URL"] == "https://api.custom-relay.com/v1"
+                assert os.environ["CODEX_IMAGE_API_KEY"] == "sk-brand-new-secret"
+
+                # Check .env file persisted
+                saved_env = test_env_file.read_text(encoding="utf-8")
+                assert "CODEX_IMAGE_BASE_URL=https://api.custom-relay.com/v1" in saved_env
+                assert "CODEX_IMAGE_API_KEY=sk-brand-new-secret" in saved_env
+
+                # Check subsequent GET /api/providers
+                providers_after = client.get("/api/providers").json()
+                target = next(p for p in providers_after if p["id"] == provider_id)
+                assert target["base_url"] == "https://api.custom-relay.com/v1"
+                assert target["ready"] is True
+

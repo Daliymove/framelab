@@ -105,7 +105,7 @@ else {
 }
 
 try {
-    $serverArgs = @((Join-Path $appDir "server.py"), "--port", [string]$Port)
+    $serverArgs = @((Join-Path $appDir "server.py"), "--port", [string]$Port, "--reload")
     if (-not $NoBrowser) {
         $serverArgs += "--open-browser"
     }

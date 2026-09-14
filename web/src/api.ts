@@ -42,6 +42,14 @@ export function getProviders() {
   return request<Provider[]>("/api/providers", { cache: "no-store" });
 }
 
+export function updateProvider(providerId: string, data: { name?: string; base_url?: string; api_key?: string }) {
+  return request<Provider>(`/api/providers/${providerId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+}
+
 export function getTags() {
   return request<Tag[]>("/api/tags", { cache: "no-store" });
 }

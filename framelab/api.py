@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from .config import Settings, persist_media_dir, public_url
+from .config import Settings, persist_media_dir, persist_provider_config, public_url
 from .db import init_db, make_session_factory
 from .models import Asset, AssetTag, AssetVariant, GenerationJob, JobEvent, Provider, RemoteObject, Tag, utcnow
 from .providers import normalize_endpoint, validate_extra_params
@@ -78,6 +78,12 @@ class ProviderInput(BaseModel):
     base_url: str = Field(min_length=1, max_length=1000)
     api_key_env: str = Field(default="CODEX_IMAGE_API_KEY", max_length=200)
     enabled: bool = True
+
+
+class ProviderUpdate(BaseModel):
+    name: str | None = Field(default=None, max_length=200)
+    base_url: str | None = Field(default=None, max_length=1000)
+    api_key: str | None = Field(default=None, max_length=1000)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -566,6 +572,57 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             session.add(row)
             session.commit()
             return {"id": row.id, "name": row.name, "base_url": public_url(row.base_url), "ready": False}
+
+    @app.patch("/api/providers/{provider_id}")
+    def update_provider(provider_id: str, payload: ProviderUpdate) -> dict[str, Any]:
+        nonlocal settings
+        with session_factory() as session:
+            row = session.get(Provider, provider_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="provider 不存在。")
+
+            clean_url: str | None = None
+            if payload.base_url is not None:
+                url_str = payload.base_url.strip()
+                if not url_str:
+                    raise HTTPException(status_code=400, detail="Base URL 不能为空。")
+                if not (url_str.startswith("http://") or url_str.startswith("https://")):
+                    raise HTTPException(status_code=400, detail="Base URL 必须以 http:// 或 https:// 开头。")
+                clean_url = url_str.rstrip("/")
+                row.base_url = clean_url
+
+            if payload.name is not None and payload.name.strip():
+                row.name = payload.name.strip()
+
+            clean_key: str | None = None
+            if payload.api_key is not None and payload.api_key.strip():
+                clean_key = payload.api_key.strip()
+                os.environ[row.api_key_env] = clean_key
+
+            row.updated_at = utcnow()
+            session.commit()
+
+            try:
+                persist_provider_config(clean_url, clean_key, api_key_env=row.api_key_env)
+            except (ValueError, OSError) as exc:
+                raise HTTPException(status_code=500, detail=f"无法保存 provider 配置到 .env：{exc}") from exc
+
+            if row.id == settings.image_provider_id:
+                new_base_url = clean_url if clean_url is not None else settings.image_base_url
+                new_key = clean_key if clean_key is not None else settings.image_api_key
+                new_name = row.name
+                settings = replace(settings, image_base_url=new_base_url, image_api_key=new_key, image_provider_name=new_name)
+                app.state.settings = settings
+
+            return {
+                "id": row.id,
+                "name": row.name,
+                "kind": row.kind,
+                "base_url": public_url(row.base_url),
+                "api_key_env": row.api_key_env,
+                "enabled": row.enabled,
+                "ready": bool(os.environ.get(row.api_key_env, "").strip() and row.base_url.strip()),
+            }
 
     @app.get("/api/tags")
     def tags() -> list[dict[str, Any]]:

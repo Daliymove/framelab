@@ -14,12 +14,15 @@ import {
   Database,
   Download,
   ExternalLink,
+  Eye,
+  EyeOff,
   FileImage,
   Filter,
   FolderOpen,
   ImagePlus,
   Images,
   Info,
+  Key,
   LayoutGrid,
   ListTodo,
   LoaderCircle,
@@ -64,6 +67,7 @@ import {
   stopWorker,
   syncAsset,
   updateMediaDir,
+  updateProvider,
   updateAsset,
   uploadAsset,
 } from "./api";
@@ -296,6 +300,11 @@ function AssetDrawer({ assetId, onClose, onChanged, setNotice }: { assetId: stri
 function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Config; providers: Provider[]; onClose: () => void; setNotice: (value: string) => void }) {
   const queryClient = useQueryClient();
   const [mediaDir, setMediaDir] = useState(config?.media_dir || "");
+  const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
+  const [editBaseUrl, setEditBaseUrl] = useState("");
+  const [editApiKey, setEditApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
+
   const saveMediaDir = useMutation({
     mutationFn: () => updateMediaDir(mediaDir),
     onSuccess: (result) => {
@@ -305,6 +314,34 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "无法更新图片目录"),
   });
+
+  const saveProviderMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { base_url?: string; api_key?: string } }) =>
+      updateProvider(id, data),
+    onSuccess: (updated) => {
+      setNotice(`Provider「${updated.name}」配置已更新并立即生效`);
+      queryClient.invalidateQueries({ queryKey: ["providers"] });
+      queryClient.invalidateQueries({ queryKey: ["config"] });
+      setEditingProviderId(null);
+      setEditApiKey("");
+    },
+    onError: (error) => {
+      setNotice(error instanceof Error ? error.message : "无法更新 Provider 配置");
+    },
+  });
+
+  const startEditProvider = (provider: Provider) => {
+    setEditingProviderId(provider.id);
+    setEditBaseUrl(provider.base_url || "");
+    setEditApiKey("");
+    setShowApiKey(false);
+  };
+
+  const cancelEditProvider = () => {
+    setEditingProviderId(null);
+    setEditBaseUrl("");
+    setEditApiKey("");
+  };
 
   useEffect(() => {
     if (config?.media_dir) setMediaDir(config.media_dir);
@@ -332,14 +369,116 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
           <button type="button" className="button primary full" onClick={() => saveMediaDir.mutate()} disabled={saveMediaDir.isPending || !mediaDir.trim()}><FolderOpen size={15} />{saveMediaDir.isPending ? "迁移中" : "保存图片路径"}</button>
           {saveMediaDir.error ? <div className="inline-error"><AlertTriangle size={15} />{saveMediaDir.error instanceof Error ? saveMediaDir.error.message : "无法更新图片目录"}</div> : null}
         </section>
-        <section className="settings-block"><div className="section-label"><WandSparkles size={14} />生图 Provider</div><div className="provider-list">{providers.map((provider) => <div key={provider.id}><span className={provider.ready ? "provider-dot ready" : "provider-dot"} /><div><strong>{provider.name}</strong><small className="mono">{provider.base_url || "未配置 Base URL"}</small></div><em>{provider.ready ? "READY" : "BLOCKED"}</em></div>)}</div></section>
+        <section className="settings-block">
+          <div className="section-label"><WandSparkles size={14} />生图 Provider</div>
+          <div className="provider-list">
+            {providers.map((provider) => {
+              const isEditing = editingProviderId === provider.id;
+              return (
+                <div key={provider.id} className={`provider-item ${isEditing ? "is-editing" : ""}`}>
+                  <div className="provider-header-row">
+                    <span className={provider.ready ? "provider-dot ready" : "provider-dot"} />
+                    <div className="provider-info">
+                      <div className="provider-title-row">
+                        <strong>{provider.name}</strong>
+                        <span className={`provider-badge ${provider.ready ? "ready" : "blocked"}`}>
+                          {provider.ready ? "READY" : "BLOCKED"}
+                        </span>
+                      </div>
+                      <small className="mono provider-url">{provider.base_url || "未配置 Base URL"}</small>
+                    </div>
+                    <button
+                      type="button"
+                      className={`icon-button small provider-edit-btn ${isEditing ? "active" : ""}`}
+                      onClick={() => isEditing ? cancelEditProvider() : startEditProvider(provider)}
+                      title={isEditing ? "取消编辑" : "配置 URL 和 Key"}
+                      aria-label={isEditing ? "取消编辑" : `编辑 ${provider.name}`}
+                    >
+                      <Pencil size={13} />
+                    </button>
+                  </div>
+
+                  {isEditing ? (
+                    <div className="provider-edit-form">
+                      <label className="input-label">
+                        Base URL
+                        <input
+                          value={editBaseUrl}
+                          onChange={(e) => setEditBaseUrl(e.target.value)}
+                          placeholder="例如 https://api.openai.com/v1"
+                          className="mono"
+                          spellCheck={false}
+                        />
+                      </label>
+                      <label className="input-label">
+                        API Key
+                        <div className="provider-key-field">
+                          <Key size={14} className="key-icon" />
+                          <input
+                            type={showApiKey ? "text" : "password"}
+                            value={editApiKey}
+                            onChange={(e) => setEditApiKey(e.target.value)}
+                            placeholder="留空则保持现有 Key 不变"
+                            className="mono"
+                            spellCheck={false}
+                          />
+                          <button
+                            type="button"
+                            className="key-toggle-btn"
+                            onClick={() => setShowApiKey(!showApiKey)}
+                            tabIndex={-1}
+                            title={showApiKey ? "隐藏 Key" : "显示 Key"}
+                          >
+                            {showApiKey ? <EyeOff size={14} /> : <Eye size={14} />}
+                          </button>
+                        </div>
+                      </label>
+                      <p className="provider-edit-help">
+                        配置将更新数据库并同步保存至 <code className="mono">.env</code>，立即生效。
+                      </p>
+                      <div className="provider-edit-actions">
+                        <button
+                          type="button"
+                          className="button small quiet"
+                          onClick={cancelEditProvider}
+                          disabled={saveProviderMutation.isPending}
+                        >
+                          取消
+                        </button>
+                        <button
+                          type="button"
+                          className="button small primary"
+                          onClick={() => saveProviderMutation.mutate({
+                            id: provider.id,
+                            data: {
+                              base_url: editBaseUrl.trim(),
+                              ...(editApiKey.trim() ? { api_key: editApiKey.trim() } : {}),
+                            },
+                          })}
+                          disabled={saveProviderMutation.isPending}
+                        >
+                          {saveProviderMutation.isPending ? "保存中..." : "保存配置"}
+                        </button>
+                      </div>
+                      {saveProviderMutation.error ? (
+                        <div className="inline-error">
+                          <AlertTriangle size={13} />
+                          {saveProviderMutation.error instanceof Error ? saveProviderMutation.error.message : "无法更新 Provider 配置"}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              );
+            })}
+          </div>
+        </section>
         <section className="settings-block"><div className="section-label"><CloudUpload size={14} />CloudFlare-ImgBed</div><dl className="settings-list"><div><dt>状态</dt><dd><span className={`status-text ${config?.imgbed.configured ? "succeeded" : "disabled"}`}>{config?.imgbed.configured ? <CheckCircle2 size={13} /> : <CircleDot size={13} />}{config?.imgbed.configured ? "已配置" : "未配置"}</span></dd></div><div><dt>REST 地址</dt><dd className="mono break">{config?.imgbed.base_url || "-"}</dd></div><div><dt>重试策略</dt><dd>仅手动重新同步</dd></div></dl></section>
-        <p className="settings-foot">密钥只由本机后端读取，不会发送到浏览器。</p>
+        <p className="settings-foot">密钥只由本机后端读取并保存在本地 .env，不会回显到浏览器。</p>
       </aside>
     </div>
   );
 }
-
 function RuntimeView({ runtime, setNotice }: { runtime?: RuntimeStatus; setNotice: (value: string) => void }) {
   const queryClient = useQueryClient();
   const start = useMutation({
@@ -541,7 +680,32 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
             {referenceUpload.error ? <div className="inline-error"><AlertTriangle size={15} />{referenceUpload.error instanceof Error ? referenceUpload.error.message : "参考图上传失败"}</div> : null}
           </section>
           <label className="input-label large">Prompt<textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} maxLength={32000} rows={15} placeholder="描述你希望如何修改参考图..." /><span className="field-foot"><span>{prompt.length.toLocaleString()} / 32,000</span><span>原文将永久保留</span></span></label>
-          <label className="input-label">父任务 ID <div className="input-with-icon"><Copy size={15} /><input value={parentJobId} onChange={(event) => setParentJobId(event.target.value)} placeholder="可选：从历史任务继续生成" /></div></label>
+          <label className="input-label">
+            父任务 ID
+            <div className="input-with-icon">
+              <Copy size={14} />
+              <input
+                value={parentJobId}
+                onChange={(event) => setParentJobId(event.target.value)}
+                placeholder="可选：从历史任务继续生成"
+                spellCheck={false}
+              />
+              {parentJobId ? (
+                <button
+                  type="button"
+                  className="field-action-btn"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    setParentJobId("");
+                  }}
+                  title="清除父任务 ID"
+                  aria-label="清除父任务 ID"
+                >
+                  <X size={12} />
+                </button>
+              ) : null}
+            </div>
+          </label>
           <div className="form-footer"><label className="toggle-row"><input type="checkbox" checked={syncEnabled} onChange={(event) => setSyncEnabled(event.target.checked)} /><span className="toggle-visual" /><span>完成后自动同步到 cloudflare-imgbed</span></label><button type="submit" className="button primary submit-button" disabled={mutation.isPending || referenceUpload.isPending || !config?.ready}><WandSparkles size={17} />{mutation.isPending ? "已提交，等待响应" : referenceAsset ? "提交参考图修改" : "加入生成队列"}<ArrowUpRight size={16} /></button></div>
           {mutation.error ? <div className="inline-error"><AlertTriangle size={15} />{mutation.error.message}</div> : null}
         </section>
@@ -551,7 +715,7 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
           <label className="input-label">调用地址<div className="endpoint-field"><b>POST</b><input value={displayedEndpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="Provider 未配置 async 地址" spellCheck={false} /></div></label>
           <p className="field-help">默认显示当前模式的 async 地址；手动修改后只覆盖本次任务。</p>
           {endpointError(displayedEndpoint) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{endpointError(displayedEndpoint)}</div> : null}
-          <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<div className="size-field"><input list="image-size-suggestions" value={size} onChange={(event) => setSize(event.target.value)} placeholder="例如 1200x800" spellCheck={false} /><datalist id="image-size-suggestions"><option value="auto" /><option value="1024x1024" /><option value="1536x864" /><option value="864x1536" /><option value="2048x2048" /><option value="2560x1440" /><option value="1440x2560" /><option value="3840x2160" /><option value="2160x3840" /><option value="2880x2880" /></datalist></div></label></div>
+          <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2.5">gpt-image-2.5</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<div className="size-field"><input list="image-size-suggestions" value={size} onChange={(event) => setSize(event.target.value)} placeholder="例如 1200x800" spellCheck={false} /><datalist id="image-size-suggestions"><option value="auto" /><option value="1024x1024" /><option value="1536x864" /><option value="864x1536" /><option value="2048x2048" /><option value="2560x1440" /><option value="1440x2560" /><option value="3840x2160" /><option value="2160x3840" /><option value="2880x2880" /></datalist></div></label></div>
           {sizeError(size) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{sizeError(size)}</div> : null}
           <fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset>
           <label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label>
