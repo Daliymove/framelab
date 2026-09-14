@@ -650,6 +650,31 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
     setExtraParamsText("");
     setNotice("请求参数已恢复默认");
   };
+  const addAsyncParam = () => {
+    try {
+      const trimmed = extraParamsText.trim();
+      if (!trimmed) {
+        setExtraParamsText('{\n  "async": true\n}');
+        setNotice('已填入附加参数 {"async": true}');
+        return;
+      }
+      const parsed = JSON.parse(trimmed);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        if (parsed.async === true) {
+          setNotice('附加参数中已包含 "async": true');
+          return;
+        }
+        parsed.async = true;
+        setExtraParamsText(JSON.stringify(parsed, null, 2));
+        setNotice('已在附加参数中新增 "async": true');
+        return;
+      }
+    } catch {
+      // ignore JSON parse error and overwrite
+    }
+    setExtraParamsText('{\n  "async": true\n}');
+    setNotice('已填入附加参数 {"async": true}');
+  };
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!prompt.trim()) return;
@@ -719,7 +744,28 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
           {sizeError(size) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{sizeError(size)}</div> : null}
           <fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset>
           <label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label>
-          <label className="input-label extra-params-label">附加参数<textarea value={extraParamsText} onChange={(event) => setExtraParamsText(event.target.value)} rows={7} spellCheck={false} placeholder={'{\n  "async": true\n}'} /></label>
+          <div className="input-label extra-params-label">
+            <div className="extra-params-header">
+              <label htmlFor="extra-params-textarea">附加参数</label>
+              <button
+                type="button"
+                className="extra-params-action-btn"
+                onClick={addAsyncParam}
+                title="一键新增 async: true 参数"
+              >
+                <Plus size={11} />
+                <span>async: true</span>
+              </button>
+            </div>
+            <textarea
+              id="extra-params-textarea"
+              value={extraParamsText}
+              onChange={(event) => setExtraParamsText(event.target.value)}
+              rows={7}
+              spellCheck={false}
+              placeholder={'{\n  "async": true\n}'}
+            />
+          </div>
           <p className="field-help">仅填写 provider body 参数。模型、prompt、n、尺寸、质量和 response_format 由上方控件生成。</p>
           {extraParamsResult.error ? <div className="inline-error compact-error"><AlertTriangle size={15} />{extraParamsResult.error}</div> : null}
           <div className="request-summary"><div><span>调用方式</span><strong><span className="status-live" />{referenceAsset ? "ASYNC EDIT" : "ASYNC JOB"}</strong></div><div><span>Provider</span><strong>{chosenProvider?.base_url || "未配置"}</strong></div><div><span>参考图</span><strong>{referenceAsset ? "1 张 · image[]" : "未选择"}</strong></div><div><span>自动重试</span><strong>0 次</strong></div></div>

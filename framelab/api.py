@@ -21,7 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import desc, func, or_, select
 from sqlalchemy.orm import Session
 
-from .config import Settings, persist_media_dir, persist_provider_config, public_url
+from .config import Settings, persist_media_dir, persist_provider_config, public_url, reload_env
 from .db import init_db, make_session_factory
 from .models import Asset, AssetTag, AssetVariant, GenerationJob, JobEvent, Provider, RemoteObject, Tag, utcnow
 from .providers import normalize_endpoint, validate_extra_params
@@ -450,6 +450,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/config")
     def config() -> dict[str, Any]:
+        nonlocal settings
+        reload_env()
+        settings = replace(
+            settings,
+            image_api_key=os.environ.get("CODEX_IMAGE_API_KEY", settings.image_api_key),
+            image_base_url=os.environ.get("CODEX_IMAGE_BASE_URL", settings.image_base_url),
+        )
+        app.state.settings = settings
         with session_factory() as session:
             provider_count = session.scalar(select(func.count()).select_from(Provider)) or 0
             asset_count = session.scalar(select(func.count()).select_from(Asset).where(Asset.deleted_at.is_(None))) or 0
@@ -541,6 +549,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/providers")
     def providers() -> list[dict[str, Any]]:
+        reload_env()
         with session_factory() as session:
             rows = list(session.scalars(select(Provider).order_by(Provider.name)))
         return [
@@ -853,6 +862,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         extra_params = _request_params(payload.extra_params)
+        reload_env()
         with session_factory() as session:
             provider_id = payload.provider_id or settings.image_provider_id
             provider = session.get(Provider, provider_id)

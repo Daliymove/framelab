@@ -7,13 +7,14 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import timedelta
 from pathlib import Path
 from typing import Any, Callable
 
 from sqlalchemy import select
 
-from .config import Settings
+from .config import Settings, reload_env
 from .db import init_db, make_session_factory
 from .imgbed import ImgBedClient, ImgBedError
 from .models import Asset, GenerationJob, JobEvent, Provider, RemoteObject, utcnow
@@ -218,12 +219,18 @@ class FrameLabWorker:
             return remote.id
 
     def _provider_for(self, session, job: GenerationJob) -> tuple[Provider, str]:
+        reload_env()
         provider = session.get(Provider, job.provider_id)
         if provider is None:
             raise ProviderError(f"provider {job.provider_id!r} 不存在。")
         api_key = os.environ.get(provider.api_key_env, "").strip()
         if not provider.base_url.strip() or not api_key:
             raise ProviderError(f"provider {provider.name} 未配置 base URL 或 API key。")
+        self.settings = replace(
+            self.settings,
+            image_api_key=api_key,
+            image_base_url=provider.base_url or self.settings.image_base_url,
+        )
         return provider, api_key
 
     def process_generation(self, job_id: str) -> None:
@@ -380,6 +387,7 @@ class FrameLabWorker:
 
     def process_sync(self, remote_id: str) -> None:
         try:
+            reload_env()
             with self.session_factory() as session:
                 remote = session.get(RemoteObject, remote_id)
                 if remote is None or remote.status != "syncing":

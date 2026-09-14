@@ -818,6 +818,9 @@ def test_provider_update_and_env_persistence():
                 assert providers[0]["ready"] is True
                 assert "api_key" not in providers[0]
 
+                session_factory = client.app.state.session_factory
+                worker = FrameLabWorker(settings, session_factory=session_factory)
+
                 response = client.patch(
                     f"/api/providers/{provider_id}",
                     json={
@@ -846,4 +849,19 @@ def test_provider_update_and_env_persistence():
                 target = next(p for p in providers_after if p["id"] == provider_id)
                 assert target["base_url"] == "https://api.custom-relay.com/v1"
                 assert target["ready"] is True
+
+                # Check worker dynamically picks up the new secret from .env without restarting
+                # simulate worker process having stale in-memory environment
+                os.environ["CODEX_IMAGE_API_KEY"] = "sk-stale-worker-key"
+                fake_job = GenerationJob(
+                    id="fake-job-id",
+                    provider_id=provider_id,
+                    provider_name_snapshot="Custom Relay",
+                    model="gpt-image-2",
+                    prompt="test",
+                )
+                with session_factory() as session:
+                    prov, key = worker._provider_for(session, fake_job)
+                    assert key == "sk-brand-new-secret"
+                    assert prov.base_url == "https://api.custom-relay.com/v1"
 

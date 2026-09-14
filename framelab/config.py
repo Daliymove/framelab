@@ -68,6 +68,11 @@ def persist_media_dir(media_dir: Path, env_path: Path | None = None) -> None:
     persist_env_variables({"FRAMELAB_MEDIA_DIR": str(media_dir)}, env_path)
 
 
+def reload_env(env_path: Path | None = None) -> None:
+    """Reload environment variables from .env file into os.environ."""
+    load_dotenv(env_path or ENV_FILE, override=True, encoding="utf-8")
+
+
 def persist_provider_config(
     base_url: str | None = None,
     api_key: str | None = None,
@@ -86,6 +91,7 @@ def persist_provider_config(
         os.environ[api_key_env] = clean_key
     if updates:
         persist_env_variables(updates, env_path)
+        reload_env(env_path)
 
 
 def _first_env(*names: str, default: str = "") -> str:
