@@ -10,6 +10,7 @@ import {
   ChevronRight,
   CircleDot,
   CloudUpload,
+  Columns3,
   Copy,
   Database,
   Download,
@@ -142,22 +143,147 @@ function StatTile({ label, value, accent }: { label: string; value: number | str
   );
 }
 
-function AssetCard({ asset, selected, onSelect, onOpen }: { asset: Asset; selected: boolean; onSelect: () => void; onOpen: () => void }) {
+function AssetCard({
+  asset,
+  selected,
+  layoutMode,
+  onSelect,
+  onOpen,
+  onUseAsReference,
+  setNotice,
+}: {
+  asset: Asset;
+  selected: boolean;
+  layoutMode: "masonry" | "grid";
+  onSelect: () => void;
+  onOpen: () => void;
+  onUseAsReference: (asset: Asset) => void;
+  setNotice: (value: string) => void;
+}) {
+  const promptText = asset.prompt || asset.prompt_override || asset.generation?.prompt || "";
+  const hasDimensions = Boolean(asset.width && asset.height);
+
+  const handleCopyPrompt = async (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!promptText) return;
+    try {
+      await navigator.clipboard.writeText(promptText);
+      setNotice("Prompt 已复制到剪贴板");
+    } catch {
+      setNotice("无法访问剪贴板，请从详情中复制");
+    }
+  };
+
+  const handleQuickReference = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    onUseAsReference(asset);
+  };
+
+  const imageAspectStyle =
+    layoutMode === "masonry" && hasDimensions
+      ? { aspectRatio: `${asset.width} / ${asset.height}` }
+      : undefined;
+
   return (
-    <article className={`asset-card ${selected ? "selected" : ""}`}>
-      <div className="asset-image-wrap">
-        <img src={asset.thumbnail_url} alt={asset.title || asset.original_filename} loading="lazy" />
-        <button type="button" className="select-check" onClick={onSelect} aria-label="选择图片">
-          {selected ? <Check size={14} /> : null}
+    <article className={`asset-card ${selected ? "selected" : ""} ${layoutMode}`}>
+      <div
+        className="asset-image-wrap"
+        style={imageAspectStyle}
+        onClick={onOpen}
+      >
+        <img
+          src={layoutMode === "masonry" ? (asset.preview_url || asset.thumbnail_url) : asset.thumbnail_url}
+          alt={asset.title || asset.original_filename}
+          loading="lazy"
+        />
+
+        {/* 顶部左侧：独立选择勾选框 */}
+        <button
+          type="button"
+          className={`select-check ${selected ? "checked" : ""}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect();
+          }}
+          aria-label="选择图片"
+          title={selected ? "取消选择" : "选择图片"}
+        >
+          {selected ? <Check size={13} strokeWidth={2.5} /> : null}
         </button>
-        <span className={`source-chip ${asset.source}`}><span>{asset.source === "generated" ? "AI" : "UP"}</span></span>
-        <span className={`sync-chip ${asset.remote.status}`} title={statusLabel(asset.remote.status)}><StatusIcon status={asset.remote.status} /></span>
+
+        {/* 顶部右侧：图床状态 */}
+        <span
+          className={`sync-chip ${asset.remote.status}`}
+          title={statusLabel(asset.remote.status)}
+        >
+          <StatusIcon status={asset.remote.status} />
+        </span>
+
+        {/* 悬停暗调渐变遮罩 */}
+        <div className="asset-card-overlay" />
+
+        {/* 底部左侧：来源徽标（固定左下角，不发生横向抖动） */}
+        <span className={`source-chip ${asset.source}`}>
+          <span>{asset.source === "generated" ? "AI" : "UP"}</span>
+        </span>
+
+        {/* 底部右侧：悬浮快捷工具栏 */}
+        <div className="asset-quick-actions" onClick={(e) => e.stopPropagation()}>
+          {promptText ? (
+            <button
+              type="button"
+              className="quick-action-btn"
+              onClick={handleCopyPrompt}
+              title="复制 Prompt"
+              aria-label="复制 Prompt"
+            >
+              <Copy size={13} />
+            </button>
+          ) : null}
+          <button
+            type="button"
+            className="quick-action-btn"
+            onClick={handleQuickReference}
+            title="以此图去创作"
+            aria-label="以此图作为参考图创作"
+          >
+            <WandSparkles size={13} />
+          </button>
+          <a
+            className="quick-action-btn"
+            href={asset.original_url}
+            download={asset.filename || asset.original_filename}
+            title="下载原图"
+            aria-label="下载原图"
+          >
+            <Download size={13} />
+          </a>
+        </div>
       </div>
+
+      {/* 卡片下半部分：精炼文字信息 */}
       <button type="button" className="asset-card-body" onClick={onOpen}>
-        <strong>{asset.title || asset.original_filename}</strong>
-        <span>{asset.width && asset.height ? `${asset.width} × ${asset.height}` : "图片"} · {formatBytes(asset.size_bytes)}</span>
-        <time>{formatDate(asset.created_at)}</time>
-        {asset.tags.length ? <div className="tag-row">{asset.tags.slice(0, 3).map((tag) => <em key={tag}>{tag}</em>)}</div> : null}
+        <div className="card-title-row">
+          <strong title={asset.title || asset.original_filename}>
+            {asset.title || asset.original_filename}
+          </strong>
+        </div>
+        <div className="card-meta-row">
+          {hasDimensions ? (
+            <span className="dimension-pill">
+              {asset.width}×{asset.height}
+            </span>
+          ) : null}
+          <span className="size-pill">{formatBytes(asset.size_bytes)}</span>
+          <time className="card-time">{formatDate(asset.created_at)}</time>
+        </div>
+        {asset.tags.length ? (
+          <div className="tag-row">
+            {asset.tags.slice(0, 3).map((tag) => (
+              <em key={tag}>#{tag}</em>
+            ))}
+          </div>
+        ) : null}
       </button>
     </article>
   );
@@ -503,11 +629,67 @@ function RuntimeView({ runtime, setNotice }: { runtime?: RuntimeStatus; setNotic
   </div>;
 }
 
-function GalleryView({ assets, filters, setFilters, selected, setSelected, onOpen, onUpload, onGenerate, setNotice }: { assets: Asset[]; filters: { q: string; source: string; sync_status: string }; setFilters: (value: { q: string; source: string; sync_status: string }) => void; selected: Set<string>; setSelected: (value: Set<string>) => void; onOpen: (id: string) => void; onUpload: () => void; onGenerate: () => void; setNotice: (value: string) => void }) {
+function GalleryView({
+  assets,
+  filters,
+  setFilters,
+  selected,
+  setSelected,
+  onOpen,
+  onUpload,
+  onGenerate,
+  onUseAsReference,
+  setNotice,
+}: {
+  assets: Asset[];
+  filters: { q: string; source: string; sync_status: string };
+  setFilters: (value: { q: string; source: string; sync_status: string }) => void;
+  selected: Set<string>;
+  setSelected: (value: Set<string>) => void;
+  onOpen: (id: string) => void;
+  onUpload: () => void;
+  onGenerate: () => void;
+  onUseAsReference: (asset: Asset) => void;
+  setNotice: (value: string) => void;
+}) {
   const queryClient = useQueryClient();
   const [tagInput, setTagInput] = useState("");
-  const sync = useMutation({ mutationFn: () => bulkSync([...selected]), onSuccess: (result) => { setNotice(`${result.queued} 张图片已加入同步队列`); setSelected(new Set()); queryClient.invalidateQueries({ queryKey: ["assets"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); } });
-  const tag = useMutation({ mutationFn: () => bulkTags([...selected], tagInput.split(",").map((item) => item.trim()).filter(Boolean)), onSuccess: () => { setNotice("批量标签已保存"); setTagInput(""); setSelected(new Set()); queryClient.invalidateQueries({ queryKey: ["assets"] }); queryClient.invalidateQueries({ queryKey: ["tags"] }); } });
+  const [layoutMode, setLayoutMode] = useState<"masonry" | "grid">(() => {
+    try {
+      return (localStorage.getItem("framelab.gallery.layout_mode") as "masonry" | "grid") || "masonry";
+    } catch {
+      return "masonry";
+    }
+  });
+
+  const handleLayoutModeChange = (mode: "masonry" | "grid") => {
+    setLayoutMode(mode);
+    try {
+      localStorage.setItem("framelab.gallery.layout_mode", mode);
+    } catch {}
+  };
+
+  const sync = useMutation({
+    mutationFn: () => bulkSync([...selected]),
+    onSuccess: (result) => {
+      setNotice(`${result.queued} 张图片已加入同步队列`);
+      setSelected(new Set());
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+      queryClient.invalidateQueries({ queryKey: ["stats"] });
+    },
+  });
+
+  const tag = useMutation({
+    mutationFn: () => bulkTags([...selected], tagInput.split(",").map((item) => item.trim()).filter(Boolean)),
+    onSuccess: () => {
+      setNotice("批量标签已保存");
+      setTagInput("");
+      setSelected(new Set());
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+      queryClient.invalidateQueries({ queryKey: ["tags"] });
+    },
+  });
+
   const remove = useMutation({
     mutationFn: () => bulkDelete([...selected]),
     onSuccess: (result) => {
@@ -519,22 +701,208 @@ function GalleryView({ assets, filters, setFilters, selected, setSelected, onOpe
     },
     onError: (error) => setNotice(error instanceof Error ? error.message : "批量删除失败"),
   });
+
   const handleBatchDelete = () => {
     if (!selected.size || remove.isPending) return;
     if (window.confirm(`确定删除选中的 ${selected.size} 张图片？删除后无法恢复。`)) remove.mutate();
   };
+
   const allSelected = assets.length > 0 && assets.every((asset) => selected.has(asset.id));
   const toggleAll = () => setSelected(allSelected ? new Set() : new Set(assets.map((asset) => asset.id)));
-  return <div className="view-stack">
-    <div className="view-heading"><div><p className="kicker">PERSONAL AI LIBRARY</p><h1>图库</h1><p className="view-subtitle">把每次创作变成可检索、可复盘的资产。</p></div><button type="button" className="button primary" onClick={onUpload}><Upload size={16} />上传图片</button></div>
-    <div className="filter-bar">
-      <div className="search-box"><Search size={17} /><input value={filters.q} onChange={(event) => setFilters({ ...filters, q: event.target.value })} placeholder="搜索文件名、标题、备注或 prompt" /></div>
-      <div className="filter-select"><Filter size={15} /><select value={filters.source} onChange={(event) => setFilters({ ...filters, source: event.target.value })}><option value="all">全部来源</option><option value="generated">AI 生成</option><option value="upload">本地上传</option></select></div>
-      <div className="filter-select"><CloudUpload size={15} /><select value={filters.sync_status} onChange={(event) => setFilters({ ...filters, sync_status: event.target.value })}><option value="all">全部同步状态</option><option value="succeeded">已同步</option><option value="pending">待同步</option><option value="failed">同步失败</option><option value="disabled">仅本地</option></select></div>
+
+  return (
+    <div className="view-stack">
+      <div className="view-heading">
+        <div>
+          <p className="kicker">PERSONAL AI LIBRARY</p>
+          <h1>图库</h1>
+          <p className="view-subtitle">把每次创作变成可检索、可复盘的资产。</p>
+        </div>
+        <button type="button" className="button primary" onClick={onUpload}>
+          <Upload size={16} />
+          上传图片
+        </button>
+      </div>
+
+      <div className="filter-bar">
+        <div className="search-box">
+          <Search size={17} />
+          <input
+            value={filters.q}
+            onChange={(event) => setFilters({ ...filters, q: event.target.value })}
+            placeholder="搜索文件名、标题、备注或 prompt"
+          />
+        </div>
+        <div className="filter-select">
+          <Filter size={15} />
+          <select
+            value={filters.source}
+            onChange={(event) => setFilters({ ...filters, source: event.target.value })}
+          >
+            <option value="all">全部来源</option>
+            <option value="generated">AI 生成</option>
+            <option value="upload">本地上传</option>
+          </select>
+        </div>
+        <div className="filter-select">
+          <CloudUpload size={15} />
+          <select
+            value={filters.sync_status}
+            onChange={(event) => setFilters({ ...filters, sync_status: event.target.value })}
+          >
+            <option value="all">全部同步状态</option>
+            <option value="succeeded">已同步</option>
+            <option value="pending">待同步</option>
+            <option value="failed">同步失败</option>
+            <option value="disabled">仅本地</option>
+          </select>
+        </div>
+        <div className="layout-mode-switch" role="group" aria-label="画幅与排版模式">
+          <button
+            type="button"
+            className={`mode-btn ${layoutMode === "masonry" ? "active" : ""}`}
+            onClick={() => handleLayoutModeChange("masonry")}
+            title="自适应画幅（瀑布流）"
+            aria-label="自适应画幅瀑布流"
+          >
+            <Columns3 size={14} />
+            <span>自适应</span>
+          </button>
+          <button
+            type="button"
+            className={`mode-btn ${layoutMode === "grid" ? "active" : ""}`}
+            onClick={() => handleLayoutModeChange("grid")}
+            title="规整网格"
+            aria-label="规整网格"
+          >
+            <LayoutGrid size={14} />
+            <span>规整</span>
+          </button>
+        </div>
+      </div>
+
+      <div className="selection-hint">
+        <div className="selection-hint-left">
+          <button type="button" onClick={toggleAll}>
+            {allSelected ? "取消全选" : `选择当前页 (${assets.length})`}
+          </button>
+          {selected.size ? (
+            <span className="selection-count-pill">已选 {selected.size} 张</span>
+          ) : null}
+        </div>
+        <span className="selection-hint-text">
+          点击图片查看详情，悬停可快速复制 Prompt 或创作；勾选可批量管理
+        </span>
+      </div>
+
+      {selected.size ? (
+        <aside className="batch-dock" role="toolbar" aria-label="批量操作浮岛">
+          <div className="dock-section dock-info">
+            <span className="dock-count-badge">{selected.size}</span>
+            <span className="dock-label">已选择</span>
+            <button
+              type="button"
+              className="dock-link-btn"
+              onClick={toggleAll}
+              title={allSelected ? "取消全选" : "全选当前页"}
+            >
+              {allSelected ? "取消全选" : "全选"}
+            </button>
+          </div>
+
+          <div className="dock-divider" />
+
+          <div className="dock-section dock-tag-group">
+            <div className="dock-tag-input">
+              <TagIcon size={13} />
+              <input
+                value={tagInput}
+                onChange={(event) => setTagInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && tagInput.trim()) {
+                    event.preventDefault();
+                    tag.mutate();
+                  }
+                }}
+                placeholder="标签，逗号分隔，按回车保存"
+              />
+            </div>
+            <button
+              type="button"
+              className="dock-btn"
+              onClick={() => tag.mutate()}
+              disabled={!tagInput.trim() || tag.isPending}
+              title="保存标签（可直接按回车）"
+            >
+              <Check size={13} />
+              <span>打标签</span>
+            </button>
+          </div>
+
+          <div className="dock-divider" />
+
+          <div className="dock-section dock-action-group">
+            <button
+              type="button"
+              className="dock-btn"
+              onClick={() => sync.mutate()}
+              disabled={sync.isPending}
+              title="将选中的图片批量同步到 cloudflare-imgbed"
+            >
+              <CloudUpload size={13} />
+              <span>{sync.isPending ? "同步中..." : "同步图床"}</span>
+            </button>
+
+            <button
+              type="button"
+              className="dock-btn danger"
+              onClick={handleBatchDelete}
+              disabled={remove.isPending}
+              title="批量删除选中的图片"
+            >
+              <Trash2 size={13} />
+              <span>{remove.isPending ? "删除中..." : "删除"}</span>
+            </button>
+          </div>
+
+          <div className="dock-divider" />
+
+          <button
+            type="button"
+            className="dock-close-btn"
+            onClick={() => setSelected(new Set())}
+            title="退出批量选择"
+            aria-label="取消全部选择"
+          >
+            <X size={15} />
+          </button>
+        </aside>
+      ) : null}
+
+      {assets.length ? (
+        <div className={layoutMode === "masonry" ? "asset-masonry" : "asset-grid"}>
+          {assets.map((asset) => (
+            <AssetCard
+              key={asset.id}
+              asset={asset}
+              layoutMode={layoutMode}
+              selected={selected.has(asset.id)}
+              onSelect={() => {
+                const next = new Set(selected);
+                next.has(asset.id) ? next.delete(asset.id) : next.add(asset.id);
+                setSelected(next);
+              }}
+              onOpen={() => onOpen(asset.id)}
+              onUseAsReference={onUseAsReference}
+              setNotice={setNotice}
+            />
+          ))}
+        </div>
+      ) : (
+        <EmptyGallery onGenerate={onGenerate} onUpload={onUpload} />
+      )}
     </div>
-    {selected.size ? <div className="batch-bar"><span><Check size={15} />已选择 {selected.size} 张</span><div className="batch-actions"><div className="batch-tag-input"><TagIcon size={14} /><input value={tagInput} onChange={(event) => setTagInput(event.target.value)} placeholder="标签，逗号分隔" /></div><button type="button" className="button small quiet" onClick={() => tag.mutate()} disabled={!tagInput.trim() || tag.isPending}><TagIcon size={14} />打标签</button><button type="button" className="button small quiet" onClick={() => sync.mutate()} disabled={sync.isPending}><CloudUpload size={14} />同步图床</button><span className="batch-divider" /><button type="button" className="button small danger" onClick={handleBatchDelete} disabled={remove.isPending}><Trash2 size={14} />{remove.isPending ? "删除中" : "删除"}</button><button type="button" className="icon-button small" onClick={() => setSelected(new Set())} aria-label="取消选择"><X size={15} /></button></div></div> : <div className="selection-hint"><button type="button" onClick={toggleAll}>{allSelected ? "取消全选" : "选择当前页"}</button><span>点击图片查看详情，选择后可批量整理</span></div>}
-    {assets.length ? <div className="asset-grid">{assets.map((asset) => <AssetCard key={asset.id} asset={asset} selected={selected.has(asset.id)} onSelect={() => { const next = new Set(selected); next.has(asset.id) ? next.delete(asset.id) : next.add(asset.id); setSelected(next); }} onOpen={() => onOpen(asset.id)} />)}</div> : <EmptyGallery onGenerate={onGenerate} onUpload={onUpload} />}
-  </div>;
+  );
 }
 
 function useGenerateDraftState<T>(key: string, initialValue: T) {
@@ -604,7 +972,19 @@ function AspectRatioIcon({ rect }: { rect?: { w: number; h: number; rx?: number 
   );
 }
 
-function GenerateView({ config, providers, onCreated, setNotice }: { config?: Config; providers: Provider[]; onCreated: () => void; setNotice: (value: string) => void }) {
+function GenerateView({
+  config,
+  providers,
+  initialReferenceAsset,
+  onCreated,
+  setNotice,
+}: {
+  config?: Config;
+  providers: Provider[];
+  initialReferenceAsset?: Asset | null;
+  onCreated: () => void;
+  setNotice: (value: string) => void;
+}) {
   const [prompt, setPrompt] = useGenerateDraftState("prompt", DEFAULT_GENERATE_PROMPT);
   const [model, setModel] = useGenerateDraftState("model", "gpt-image-2");
   const [size, setSize] = useGenerateDraftState("size", "auto");
@@ -621,6 +1001,13 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const referenceFileInput = useRef<HTMLInputElement>(null);
   const queryClient = useQueryClient();
+
+  useEffect(() => {
+    if (initialReferenceAsset) {
+      clearAutomaticEndpointOverride(true);
+      setReferenceAsset(initialReferenceAsset);
+    }
+  }, [initialReferenceAsset]);
   const chosenProvider = providers.find((item) => item.id === (providerId || config?.provider.id));
   const defaultEndpoint = defaultGenerationEndpoint(chosenProvider?.base_url || config?.provider.base_url, Boolean(referenceAsset));
   const automaticEndpoints = [
@@ -1109,9 +1496,27 @@ export default function App() {
   const upload = useMutation({ mutationFn: (file: File) => uploadAsset(file, { title: "", notes: "", tags: "", sync_enabled: true }), onSuccess: (result) => { setNotice(result.created ? "图片已入库并进入同步队列" : "检测到相同文件，已打开已有记录"); queryClient.invalidateQueries({ queryKey: ["assets"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); setSelectedAssetId(result.asset.id); }, onError: (error) => setNotice(error.message) });
   useEffect(() => { if (!notice) return; const timer = window.setTimeout(() => setNotice(""), 4200); return () => window.clearTimeout(timer); }, [notice]);
   const activeJobCount = useMemo(() => (jobs.data || []).filter((job) => !["succeeded", "failed", "canceled"].includes(job.status)).length, [jobs.data]);
-  const chooseView = (next: View) => { setView(next); setSelected(new Set()); if (next === "gallery") { queryClient.invalidateQueries({ queryKey: ["assets"] }); } };
+  const [directReferenceAsset, setDirectReferenceAsset] = useState<Asset | null>(null);
+
+  const chooseView = (next: View) => {
+    setView(next);
+    setSelected(new Set());
+    if (next === "gallery") {
+      queryClient.invalidateQueries({ queryKey: ["assets"] });
+    }
+  };
+
+  const handleUseAsReference = (asset: Asset) => {
+    try {
+      sessionStorage.setItem("framelab.generate.reference-asset", JSON.stringify(asset));
+    } catch {}
+    setDirectReferenceAsset(asset);
+    chooseView("generate");
+    setNotice(`已将「${asset.title || asset.original_filename}」设为创作参考图`);
+  };
+
   const openUpload = () => fileInput.current?.click();
   const handleFile = (event: React.ChangeEvent<HTMLInputElement>) => { const file = event.target.files?.[0]; if (file) upload.mutate(file); event.target.value = ""; };
   const statData: Stats = stats.data || { assets: 0, generated: 0, uploaded: 0, active_jobs: 0, failed_jobs: 0, synced: 0 };
-  return <div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-icon"><Sparkles size={19} /><span /></div><div><strong>FrameLab</strong><small>PERSONAL AI ARCHIVE</small></div></div><nav className="main-nav"><NavButton active={view === "gallery"} icon={<LayoutGrid size={16} />} label="图库" onClick={() => chooseView("gallery")} count={statData.assets} /><NavButton active={view === "generate"} icon={<WandSparkles size={16} />} label="开始创作" onClick={() => chooseView("generate")} /><NavButton active={view === "jobs"} icon={<ListTodo size={16} />} label="任务中心" onClick={() => chooseView("jobs")} count={activeJobCount} /><NavButton active={view === "runtime"} icon={<Activity size={16} />} label="运行状态" onClick={() => chooseView("runtime")} /></nav><div className="top-actions"><span className={`connection-pill ${config.data?.ready ? "ready" : ""}`}><i />{config.data?.ready ? "API READY" : "需要配置"}</span><button type="button" className="icon-button" title="设置" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></button></div></header><main className="main-content"><section className="command-bar"><div><span className="command-line"><span className="live-pulse" />LOCAL SESSION / TRACEABLE BY DEFAULT</span><p>你的创作记录，终于有一个能回去找的地方。</p></div><div className="command-stats"><span><b>{statData.generated}</b> 生成</span><span><b>{statData.uploaded}</b> 上传</span><span><b>{statData.synced}</b> 已同步</span></div></section>{view === "gallery" ? <GalleryView assets={assets.data?.items || []} filters={filters} setFilters={setFilters} selected={selected} setSelected={setSelected} onOpen={setSelectedAssetId} onUpload={openUpload} onGenerate={() => chooseView("generate")} setNotice={setNotice} /> : null}{view === "generate" ? <GenerateView config={config.data} providers={providers.data || []} onCreated={() => { setView("jobs"); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }} setNotice={setNotice} /> : null}{view === "jobs" ? <JobsView jobs={jobs.data || []} onOpenAsset={(id) => setSelectedAssetId(id)} setNotice={setNotice} /> : null}{view === "runtime" ? <RuntimeView runtime={runtime.data} setNotice={setNotice} /> : null}</main><footer><span>FRAMELAB / LOCAL ONLY</span><span>ORIGINALS STAY ON THIS MACHINE</span><span className="footer-path">{config.data?.media_dir || config.data?.data_dir || "图片目录读取中"}</span></footer><input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={handleFile} />{selectedAssetId ? <AssetDrawer assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} onChanged={() => { queryClient.invalidateQueries({ queryKey: ["assets"] }); }} setNotice={setNotice} /> : null}{settingsOpen ? <SettingsDrawer config={config.data} providers={providers.data || []} onClose={() => setSettingsOpen(false)} setNotice={setNotice} /> : null}{notice ? <div className="toast"><Info size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice("")} aria-label="关闭提示"><X size={14} /></button></div> : null}</div>;
+  return <div className="app-shell"><header className="topbar"><div className="brand"><div className="brand-icon"><Sparkles size={19} /><span /></div><div><strong>FrameLab</strong><small>PERSONAL AI ARCHIVE</small></div></div><nav className="main-nav"><NavButton active={view === "gallery"} icon={<LayoutGrid size={16} />} label="图库" onClick={() => chooseView("gallery")} count={statData.assets} /><NavButton active={view === "generate"} icon={<WandSparkles size={16} />} label="开始创作" onClick={() => chooseView("generate")} /><NavButton active={view === "jobs"} icon={<ListTodo size={16} />} label="任务中心" onClick={() => chooseView("jobs")} count={activeJobCount} /><NavButton active={view === "runtime"} icon={<Activity size={16} />} label="运行状态" onClick={() => chooseView("runtime")} /></nav><div className="top-actions"><span className={`connection-pill ${config.data?.ready ? "ready" : ""}`}><i />{config.data?.ready ? "API READY" : "需要配置"}</span><button type="button" className="icon-button" title="设置" onClick={() => setSettingsOpen(true)}><Settings2 size={17} /></button></div></header><main className="main-content"><section className="command-bar"><div><span className="command-line"><span className="live-pulse" />LOCAL SESSION / TRACEABLE BY DEFAULT</span><p>你的创作记录，终于有一个能回去找的地方。</p></div><div className="command-stats"><span><b>{statData.generated}</b> 生成</span><span><b>{statData.uploaded}</b> 上传</span><span><b>{statData.synced}</b> 已同步</span></div></section>{view === "gallery" ? <GalleryView assets={assets.data?.items || []} filters={filters} setFilters={setFilters} selected={selected} setSelected={setSelected} onOpen={setSelectedAssetId} onUpload={openUpload} onGenerate={() => chooseView("generate")} onUseAsReference={handleUseAsReference} setNotice={setNotice} /> : null}{view === "generate" ? <GenerateView config={config.data} providers={providers.data || []} initialReferenceAsset={directReferenceAsset} onCreated={() => { setView("jobs"); queryClient.invalidateQueries({ queryKey: ["jobs"] }); queryClient.invalidateQueries({ queryKey: ["stats"] }); }} setNotice={setNotice} /> : null}{view === "jobs" ? <JobsView jobs={jobs.data || []} onOpenAsset={(id) => setSelectedAssetId(id)} setNotice={setNotice} /> : null}{view === "runtime" ? <RuntimeView runtime={runtime.data} setNotice={setNotice} /> : null}</main><footer><span>FRAMELAB / LOCAL ONLY</span><span>ORIGINALS STAY ON THIS MACHINE</span><span className="footer-path">{config.data?.media_dir || config.data?.data_dir || "图片目录读取中"}</span></footer><input ref={fileInput} type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden onChange={handleFile} />{selectedAssetId ? <AssetDrawer assetId={selectedAssetId} onClose={() => setSelectedAssetId(null)} onChanged={() => { queryClient.invalidateQueries({ queryKey: ["assets"] }); }} setNotice={setNotice} /> : null}{settingsOpen ? <SettingsDrawer config={config.data} providers={providers.data || []} onClose={() => setSettingsOpen(false)} setNotice={setNotice} /> : null}{notice ? <div className="toast"><Info size={16} /><span>{notice}</span><button type="button" onClick={() => setNotice("")} aria-label="关闭提示"><X size={14} /></button></div> : null}</div>;
 }

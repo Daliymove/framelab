@@ -207,6 +207,7 @@ def _asset_payload(session: Session, asset: Asset, settings: Settings, *, detail
         "title": asset.title,
         "notes": asset.notes,
         "prompt_override": asset.prompt_override,
+        "prompt": asset.prompt_override or (generation.prompt if generation else ""),
         "sync_enabled": asset.sync_enabled,
         "created_at": _iso(asset.created_at),
         "updated_at": _iso(asset.updated_at),

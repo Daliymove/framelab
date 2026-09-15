@@ -37,6 +37,7 @@ export interface Asset {
   title: string;
   notes: string;
   prompt_override: string;
+  prompt?: string;
   sync_enabled: boolean;
   created_at: string | null;
   updated_at: string | null;
