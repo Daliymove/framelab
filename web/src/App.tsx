@@ -1060,9 +1060,16 @@ function JobsView({ jobs, onOpenAsset, setNotice }: { jobs: Job[]; onOpenAsset: 
 }
 
 export default function App() {
-  const [view, setView] = useState<View>("gallery");
-  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [view, setView] = useState<View>(() => {
+    const p = new URLSearchParams(window.location.search).get("view");
+    return p === "generate" || p === "jobs" || p === "runtime" ? p : "gallery";
+  });
+  const [selectedAssetId, setSelectedAssetId] = useState<string | null>(() => {
+    return new URLSearchParams(window.location.search).get("asset") || null;
+  });
+  const [settingsOpen, setSettingsOpen] = useState(() => {
+    return new URLSearchParams(window.location.search).get("settings") === "true";
+  });
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [filters, setFilters] = useState({ q: "", source: "all", sync_status: "all" });
   const [notice, setNotice] = useState("");
