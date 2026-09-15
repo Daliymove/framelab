@@ -853,8 +853,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def create_generation_job(payload: GenerateRequest) -> dict[str, Any]:
         if not re.fullmatch(r"gpt-image-[A-Za-z0-9._-]+", payload.model):
             raise HTTPException(status_code=400, detail="模型名称必须是 gpt-image-*。")
-        if payload.size != "auto" and not re.fullmatch(r"[1-9]\d{0,4}x[1-9]\d{0,4}", payload.size):
-            raise HTTPException(status_code=400, detail="图片尺寸必须是 auto 或宽x高格式，例如 1200x800。")
+        size_normalized = payload.size.strip().lower()
+        if (
+            size_normalized != "auto"
+            and not re.fullmatch(r"[1-9]\d{0,2}:[1-9]\d{0,2}", size_normalized)
+            and not re.fullmatch(r"[1-9]\d{0,4}x[1-9]\d{0,4}", size_normalized)
+        ):
+            raise HTTPException(status_code=400, detail="图片尺寸必须是 auto、画幅比例（如 16:9、1:1）或宽x高格式，例如 1200x800。")
         if payload.quality not in {"low", "medium", "high", "auto"}:
             raise HTTPException(status_code=400, detail="不支持的图片质量。")
         try:
@@ -893,7 +898,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 reference_asset_id=reference_asset.id if reference_asset else None,
                 model=payload.model,
                 prompt=payload.prompt.strip(),
-                size=payload.size,
+                size=size_normalized,
                 quality=payload.quality,
                 timeout_seconds=payload.timeout,
                 sync_enabled=payload.sync_enabled,

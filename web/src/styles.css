@@ -1475,6 +1475,126 @@ p {
   font-family: var(--font-metadata);
 }
 
+/* Aspect Ratio Selector */
+.aspect-ratio-fieldset {
+  margin: 16px 0 0;
+  border: 0;
+  padding: 0;
+}
+
+.aspect-ratio-legend-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.aspect-ratio-legend-row legend {
+  color: var(--color-ink-primary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0;
+}
+
+.custom-size-toggle {
+  font-size: 11px;
+  color: var(--color-ink-faint);
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  cursor: pointer;
+  transition: color var(--duration-fast);
+}
+
+.custom-size-toggle:hover {
+  color: var(--color-ink-primary);
+}
+
+.aspect-ratio-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.aspect-ratio-btn {
+  height: 52px;
+  padding: 6px 4px;
+  border: 1.5px solid transparent;
+  background: var(--color-surface-sunken);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+  cursor: pointer;
+  color: var(--color-ink-secondary);
+  transition: border-color var(--duration-fast), background var(--duration-fast), color var(--duration-fast);
+  user-select: none;
+  outline: none;
+}
+
+.aspect-ratio-btn:hover {
+  border-color: var(--color-line-strong);
+  color: var(--color-ink-primary);
+  background: var(--color-surface);
+}
+
+.aspect-ratio-btn.active {
+  border-color: #8c8c93;
+  background: #e4e4e7;
+  color: var(--color-ink-primary);
+}
+
+.aspect-ratio-btn .aspect-ratio-icon {
+  width: 18px;
+  height: 18px;
+  color: inherit;
+  display: block;
+}
+
+.aspect-ratio-btn .aspect-ratio-label {
+  font-family: var(--font-metadata);
+  font-size: 11px;
+  line-height: 1;
+  font-weight: 500;
+  color: inherit;
+}
+
+.aspect-ratio-btn.text-only .aspect-ratio-label {
+  font-size: 13px;
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+
+.aspect-ratio-btn.active.text-only .aspect-ratio-label {
+  font-weight: 600;
+}
+
+.custom-size-row {
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.custom-size-row input {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  color: var(--color-ink-primary);
+  font-family: var(--font-metadata);
+  font-size: 12px;
+  outline: none;
+}
+
+.custom-size-row input:focus {
+  border-color: var(--color-signal-primary);
+}
+
 .quality-options {
   margin: 18px 0 0;
   border: 0;

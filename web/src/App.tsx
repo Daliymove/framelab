@@ -559,10 +559,57 @@ function useGenerateDraftState<T>(key: string, initialValue: T) {
 
 const DEFAULT_GENERATE_PROMPT = "把参考图美化成一张更精致的作品，保留主体和核心构图，优化光线、材质、色彩与细节，画面干净，无 logo 和水印。";
 
+interface AspectRatioPreset {
+  value: string;
+  label: string;
+  rect?: { w: number; h: number; rx?: number };
+}
+
+const ASPECT_RATIO_PRESETS: AspectRatioPreset[] = [
+  { value: "auto", label: "自动" },
+  { value: "1:1", label: "1:1", rect: { w: 12, h: 12, rx: 1.5 } },
+  { value: "1:4", label: "1:4", rect: { w: 4, h: 16, rx: 1.5 } },
+  { value: "1:8", label: "1:8", rect: { w: 2.5, h: 16, rx: 1 } },
+  { value: "2:3", label: "2:3", rect: { w: 10, h: 15, rx: 1.5 } },
+  { value: "3:2", label: "3:2", rect: { w: 15, h: 10, rx: 1.5 } },
+  { value: "3:4", label: "3:4", rect: { w: 11, h: 14.7, rx: 1.5 } },
+  { value: "4:1", label: "4:1", rect: { w: 16, h: 4, rx: 1.5 } },
+  { value: "4:3", label: "4:3", rect: { w: 14.7, h: 11, rx: 1.5 } },
+  { value: "4:5", label: "4:5", rect: { w: 12, h: 15, rx: 1.5 } },
+  { value: "5:4", label: "5:4", rect: { w: 15, h: 12, rx: 1.5 } },
+  { value: "8:1", label: "8:1", rect: { w: 16, h: 2.5, rx: 1 } },
+  { value: "9:16", label: "9:16", rect: { w: 9, h: 16, rx: 1.5 } },
+  { value: "16:9", label: "16:9", rect: { w: 16, h: 9, rx: 1.5 } },
+  { value: "21:9", label: "21:9", rect: { w: 17, h: 7.3, rx: 1.5 } },
+];
+
+function AspectRatioIcon({ rect }: { rect?: { w: number; h: number; rx?: number } }) {
+  if (!rect) return null;
+  const x = (20 - rect.w) / 2;
+  const y = (20 - rect.h) / 2;
+  return (
+    <svg className="aspect-ratio-icon" viewBox="0 0 20 20" aria-hidden="true">
+      <rect
+        x={x}
+        y={y}
+        width={rect.w}
+        height={rect.h}
+        rx={rect.rx ?? 1.5}
+        ry={rect.rx ?? 1.5}
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.25"
+      />
+    </svg>
+  );
+}
+
 function GenerateView({ config, providers, onCreated, setNotice }: { config?: Config; providers: Provider[]; onCreated: () => void; setNotice: (value: string) => void }) {
   const [prompt, setPrompt] = useGenerateDraftState("prompt", DEFAULT_GENERATE_PROMPT);
   const [model, setModel] = useGenerateDraftState("model", "gpt-image-2");
   const [size, setSize] = useGenerateDraftState("size", "auto");
+  const isPresetSize = ASPECT_RATIO_PRESETS.some((p) => p.value.toLowerCase() === size.trim().toLowerCase());
+  const [showCustomSize, setShowCustomSize] = useState(!isPresetSize && size.trim() !== "");
   const [quality, setQuality] = useGenerateDraftState("quality", "high");
   const [timeout, setTimeoutValue] = useGenerateDraftState("timeout", 600);
   const [providerId, setProviderId] = useGenerateDraftState("provider", "");
@@ -645,6 +692,7 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
     setEndpoint("");
     setModel("gpt-image-2");
     setSize("auto");
+    setShowCustomSize(false);
     setQuality("high");
     setTimeoutValue(600);
     setExtraParamsText("");
@@ -739,8 +787,70 @@ function GenerateView({ config, providers, onCreated, setNotice }: { config?: Co
           <label className="input-label">Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.ready ? " · ready" : " · 未配置"}</option>)}</select></label>
           <label className="input-label">调用地址<div className="endpoint-field"><b>POST</b><input value={displayedEndpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="Provider 未配置 async 地址" spellCheck={false} /></div></label>
           <p className="field-help">默认显示当前模式的 async 地址；手动修改后只覆盖本次任务。</p>
-          {endpointError(displayedEndpoint) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{endpointError(displayedEndpoint)}</div> : null}
-          <div className="option-grid"><label className="input-label">模型<select value={model} onChange={(event) => setModel(event.target.value)}><option value="gpt-image-2">gpt-image-2</option><option value="gpt-image-2.5">gpt-image-2.5</option><option value="gpt-image-2-2k">gpt-image-2-2k</option><option value="gpt-image-2-4k">gpt-image-2-4k</option></select></label><label className="input-label">尺寸<div className="size-field"><input list="image-size-suggestions" value={size} onChange={(event) => setSize(event.target.value)} placeholder="例如 1200x800" spellCheck={false} /><datalist id="image-size-suggestions"><option value="auto" /><option value="1024x1024" /><option value="1536x864" /><option value="864x1536" /><option value="2048x2048" /><option value="2560x1440" /><option value="1440x2560" /><option value="3840x2160" /><option value="2160x3840" /><option value="2880x2880" /></datalist></div></label></div>
+          <label className="input-label">
+            模型
+            <select value={model} onChange={(event) => setModel(event.target.value)}>
+              <option value="gpt-image-2">gpt-image-2</option>
+              <option value="gpt-image-2.5">gpt-image-2.5</option>
+              <option value="gpt-image-2-2k">gpt-image-2-2k</option>
+              <option value="gpt-image-2-4k">gpt-image-2-4k</option>
+            </select>
+          </label>
+          <fieldset className="aspect-ratio-fieldset">
+            <div className="aspect-ratio-legend-row">
+              <legend>画幅比例</legend>
+              <button
+                type="button"
+                className="text-button custom-size-toggle"
+                onClick={() => setShowCustomSize((prev) => !prev)}
+              >
+                {showCustomSize ? "收起自定义" : "自定义尺寸"}
+              </button>
+            </div>
+            <div className="aspect-ratio-grid">
+              {ASPECT_RATIO_PRESETS.map((item) => {
+                const isSelected = size.trim().toLowerCase() === item.value.toLowerCase();
+                return (
+                  <button
+                    key={item.value}
+                    type="button"
+                    className={`aspect-ratio-btn ${isSelected ? "active" : ""} ${!item.rect ? "text-only" : ""}`}
+                    onClick={() => {
+                      setSize(item.value);
+                      setShowCustomSize(false);
+                    }}
+                    title={item.label}
+                  >
+                    <AspectRatioIcon rect={item.rect} />
+                    <span className="aspect-ratio-label">{item.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+            {showCustomSize ? (
+              <div className="custom-size-row">
+                <input
+                  type="text"
+                  value={size}
+                  onChange={(event) => setSize(event.target.value)}
+                  placeholder="例如 1200x800 或 16:9"
+                  spellCheck={false}
+                />
+                {size !== "auto" ? (
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => {
+                      setSize("auto");
+                      setShowCustomSize(false);
+                    }}
+                  >
+                    设为自动
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </fieldset>
           {sizeError(size) ? <div className="inline-error compact-error"><AlertTriangle size={15} />{sizeError(size)}</div> : null}
           <fieldset className="quality-options"><legend>质量</legend><div>{["low", "medium", "high", "auto"].map((item) => <label key={item}><input type="radio" name="quality" value={item} checked={quality === item} onChange={() => setQuality(item)} /><span>{item === "medium" ? "MED" : item.toUpperCase()}</span></label>)}</div></fieldset>
           <label className="input-label">最长等待<span className="unit-field"><input type="number" min={30} max={1800} step={30} value={timeout} onChange={(event) => setTimeoutValue(Number(event.target.value))} /><b>SEC</b></span></label>
@@ -887,9 +997,17 @@ function endpointError(value: string) {
 function sizeError(value: string) {
   const normalized = value.trim().toLowerCase();
   if (normalized === "auto") return "";
-  if (!/^[1-9]\d{0,4}x[1-9]\d{0,4}$/.test(normalized)) return "尺寸请输入 auto 或正整数宽x高，例如 1200x800。";
-  const [width, height] = normalized.split("x").map(Number);
-  return width > 0 && height > 0 ? "" : "尺寸的宽度和高度必须大于 0。";
+  if (
+    !/^[1-9]\d{0,2}:[1-9]\d{0,2}$/.test(normalized) &&
+    !/^[1-9]\d{0,4}x[1-9]\d{0,4}$/.test(normalized)
+  ) {
+    return "尺寸必须是 auto、画幅比例（如 16:9、1:1）或宽x高格式（例如 1200x800）。";
+  }
+  if (normalized.includes("x")) {
+    const [width, height] = normalized.split("x").map(Number);
+    return width > 0 && height > 0 ? "" : "尺寸的宽度和高度必须大于 0。";
+  }
+  return "";
 }
 
 function requestForDisplay(request: Record<string, unknown> | undefined) {

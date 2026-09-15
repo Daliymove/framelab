@@ -865,3 +865,48 @@ def test_provider_update_and_env_persistence():
                     assert key == "sk-brand-new-secret"
                     assert prov.base_url == "https://api.custom-relay.com/v1"
 
+
+def test_generation_job_size_validation():
+    with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+        os.environ,
+        {
+            "FRAMELAB_DATA_DIR": temporary,
+            "CODEX_IMAGE_API_KEY": "test-key",
+            "CODEX_IMAGE_BASE_URL": "http://127.0.0.1:9999/v1",
+            "FRAMELAB_IMGBED_ENABLED": "false",
+        },
+        clear=False,
+    ):
+        settings = Settings.from_env()
+        with TestClient(create_app(settings)) as client:
+            valid_sizes = ["auto", "1:1", "16:9", "9:16", "21:9", "1:4", "8:1", "1024x1024", "1200x800"]
+            for s in valid_sizes:
+                resp = client.post(
+                    "/api/generation/jobs",
+                    json={
+                        "prompt": "测试尺寸有效性",
+                        "model": "gpt-image-2",
+                        "size": s,
+                        "quality": "high",
+                        "timeout": 120,
+                        "sync_enabled": False,
+                    },
+                )
+                assert resp.status_code == 202, f"Failed for size {s}: {resp.text}"
+                assert resp.json()["size"] == s.lower()
+
+            invalid_sizes = ["invalid", "0x0", "-1:-1", "16:9:1", "auto1", "x800"]
+            for s in invalid_sizes:
+                resp = client.post(
+                    "/api/generation/jobs",
+                    json={
+                        "prompt": "测试尺寸无效性",
+                        "model": "gpt-image-2",
+                        "size": s,
+                        "quality": "high",
+                        "timeout": 120,
+                        "sync_enabled": False,
+                    },
+                )
+                assert resp.status_code == 400, f"Expected 400 for size {s}"
+
