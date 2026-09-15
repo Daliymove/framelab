@@ -483,6 +483,24 @@ def main() -> None:
                     daemon=True,
                 )
                 parent_thread.start()
+            if os.name == "nt":
+                try:
+                    import ctypes
+                    from ctypes import wintypes
+
+                    def _worker_ctrl_handler(ctrl_type: int) -> bool:
+                        if ctrl_type in (5, 6):
+                            worker.stop()
+                            os._exit(0)
+                        return False
+
+                    handler_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.DWORD)
+                    global _worker_ctrl_ref
+                    _worker_ctrl_ref = handler_type(_worker_ctrl_handler)
+                    ctypes.windll.kernel32.SetConsoleCtrlHandler(_worker_ctrl_ref, True)
+                except Exception:
+                    pass
+
             for signal_name in ("SIGINT", "SIGTERM"):
                 signal_number = getattr(signal, signal_name, None)
                 if signal_number is not None:

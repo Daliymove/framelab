@@ -2,7 +2,9 @@ param(
     [int]$Port = 8765,
     [switch]$NoBrowser,
     [switch]$RebuildFrontend,
-    [string]$DataDir = ""
+    [string]$DataDir = "",
+    [switch]$SetupOnly,
+    [Parameter(ValueFromRemainingArguments = $true)][string[]]$ExtraArgs
 )
 
 $ErrorActionPreference = "Stop"
@@ -88,6 +90,11 @@ if ($needsBuild) {
     & npm run build --prefix $webDir
 }
 
+if ($SetupOnly) {
+    Write-Host "FrameLab environment is ready."
+    exit 0
+}
+
 $env:FRAMELAB_PORT = [string]$Port
 if ($DataDir) {
     $env:FRAMELAB_DATA_DIR = [System.IO.Path]::GetFullPath($DataDir)
@@ -113,6 +120,9 @@ try {
 }
 finally {
     if ($worker -and -not $worker.HasExited) {
-        Stop-Process -Id $worker.Id -Force
+        try {
+            Stop-Process -Id $worker.Id -Force -ErrorAction SilentlyContinue
+        }
+        catch { }
     }
 }
