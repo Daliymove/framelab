@@ -77,9 +77,10 @@ def persist_provider_config(
     base_url: str | None = None,
     api_key: str | None = None,
     api_key_env: str = "CODEX_IMAGE_API_KEY",
+    default_model: str | None = None,
     env_path: Path | None = None,
 ) -> None:
-    """Persist provider base_url and api_key to .env and sync with os.environ."""
+    """Persist provider base_url, api_key, and default_model to .env and sync with os.environ."""
     updates: dict[str, str] = {}
     if base_url is not None and base_url.strip():
         clean_url = base_url.strip().rstrip("/")
@@ -89,9 +90,27 @@ def persist_provider_config(
         clean_key = api_key.strip()
         updates[api_key_env] = clean_key
         os.environ[api_key_env] = clean_key
+    if default_model is not None and default_model.strip():
+        clean_model = default_model.strip()
+        updates["CODEX_IMAGE_DEFAULT_MODEL"] = clean_model
+        os.environ["CODEX_IMAGE_DEFAULT_MODEL"] = clean_model
     if updates:
         persist_env_variables(updates, env_path)
         reload_env(env_path)
+
+
+DEFAULT_AVAILABLE_MODELS: tuple[str, ...] = (
+    "gpt-image-2.6",
+    "gpt-image-2.5",
+    "gpt-image-2",
+    "gpt-image-2-2k",
+    "gpt-image-2-4k",
+)
+
+
+def _parse_model_list(value: str) -> tuple[str, ...]:
+    models = [item.strip() for item in value.split(",") if item.strip()]
+    return tuple(models) if models else DEFAULT_AVAILABLE_MODELS
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -130,6 +149,7 @@ class Settings:
     image_provider_id: str
     image_provider_name: str
     image_model: str
+    image_available_models: tuple[str, ...]
     image_poll_interval: float
     image_max_prompt_chars: int
     image_max_wait_seconds: int
@@ -158,6 +178,14 @@ class Settings:
             "CLOUDFLARE_IMGBED_BASE_URL",
             "IMGBED_BASE_URL",
         )
+        default_model = _first_env("CODEX_IMAGE_DEFAULT_MODEL", default="gpt-image-2.6")
+        parsed_models = _parse_model_list(
+            _first_env("CODEX_IMAGE_AVAILABLE_MODELS", default=",".join(DEFAULT_AVAILABLE_MODELS))
+        )
+        if default_model not in parsed_models:
+            available_models = (default_model, *parsed_models)
+        else:
+            available_models = parsed_models
         return cls(
             host=_first_env("FRAMELAB_HOST", default="127.0.0.1"),
             port=int(_first_env("FRAMELAB_PORT", default="8765")),
@@ -169,7 +197,8 @@ class Settings:
             image_base_url=image_base_url,
             image_provider_id=_first_env("CODEX_IMAGE_PROVIDER_ID", default="codex-relay"),
             image_provider_name=_first_env("CODEX_IMAGE_PROVIDER_NAME", default="Image Relay"),
-            image_model=_first_env("CODEX_IMAGE_DEFAULT_MODEL", default="gpt-image-2"),
+            image_model=default_model,
+            image_available_models=available_models,
             image_poll_interval=float(_first_env("CODEX_IMAGE_POLL_INTERVAL", default="3")),
             image_max_prompt_chars=int(_first_env("CODEX_IMAGE_MAX_PROMPT_CHARS", default="32000")),
             image_max_wait_seconds=int(_first_env("CODEX_IMAGE_MAX_WAIT_SECONDS", default="1800")),

@@ -31,7 +31,7 @@ from .storage import absolute_media_path, create_asset_from_bytes, get_variant, 
 
 class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=32000)
-    model: str = Field(default="gpt-image-2", min_length=1, max_length=120)
+    model: str = Field(default="gpt-image-2.6", min_length=1, max_length=120)
     size: str = Field(default="auto", max_length=40)
     quality: str = Field(default="high", max_length=30)
     timeout: int = Field(default=600, ge=30, le=1800)
@@ -84,6 +84,7 @@ class ProviderUpdate(BaseModel):
     name: str | None = Field(default=None, max_length=200)
     base_url: str | None = Field(default=None, max_length=1000)
     api_key: str | None = Field(default=None, max_length=1000)
+    default_model: str | None = Field(default=None, max_length=120)
 
 
 def _iso(value: datetime | None) -> str | None:
@@ -457,6 +458,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings,
             image_api_key=os.environ.get("CODEX_IMAGE_API_KEY", settings.image_api_key),
             image_base_url=os.environ.get("CODEX_IMAGE_BASE_URL", settings.image_base_url),
+            image_model=os.environ.get("CODEX_IMAGE_DEFAULT_MODEL", settings.image_model),
         )
         app.state.settings = settings
         with session_factory() as session:
@@ -474,6 +476,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "name": settings.image_provider_name,
                 "base_url": settings.image_base_url_public,
             },
+            "default_model": settings.image_model,
+            "available_models": list(settings.image_available_models),
             "imgbed": {
                 "enabled": settings.imgbed_enabled,
                 "configured": bool(settings.imgbed_base_url),
@@ -562,6 +566,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "api_key_env": row.api_key_env,
                 "enabled": row.enabled,
                 "ready": bool(os.environ.get(row.api_key_env, "").strip() and row.base_url.strip()),
+                "default_model": settings.image_model,
             }
             for row in rows
         ]
@@ -609,11 +614,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 clean_key = payload.api_key.strip()
                 os.environ[row.api_key_env] = clean_key
 
+            clean_model: str | None = None
+            if payload.default_model is not None and payload.default_model.strip():
+                clean_model = payload.default_model.strip()
+                if not re.fullmatch(r"[A-Za-z0-9._/-]+", clean_model):
+                    raise HTTPException(status_code=400, detail="默认模型名称格式无效。")
+                os.environ["CODEX_IMAGE_DEFAULT_MODEL"] = clean_model
+
             row.updated_at = utcnow()
             session.commit()
 
             try:
-                persist_provider_config(clean_url, clean_key, api_key_env=row.api_key_env)
+                persist_provider_config(clean_url, clean_key, api_key_env=row.api_key_env, default_model=clean_model)
             except (ValueError, OSError) as exc:
                 raise HTTPException(status_code=500, detail=f"无法保存 provider 配置到 .env：{exc}") from exc
 
@@ -621,7 +633,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 new_base_url = clean_url if clean_url is not None else settings.image_base_url
                 new_key = clean_key if clean_key is not None else settings.image_api_key
                 new_name = row.name
-                settings = replace(settings, image_base_url=new_base_url, image_api_key=new_key, image_provider_name=new_name)
+                new_model = clean_model if clean_model is not None else settings.image_model
+                settings = replace(
+                    settings,
+                    image_base_url=new_base_url,
+                    image_api_key=new_key,
+                    image_provider_name=new_name,
+                    image_model=new_model,
+                )
                 app.state.settings = settings
 
             return {
@@ -632,6 +651,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "api_key_env": row.api_key_env,
                 "enabled": row.enabled,
                 "ready": bool(os.environ.get(row.api_key_env, "").strip() and row.base_url.strip()),
+                "default_model": settings.image_model,
             }
 
     @app.get("/api/tags")
@@ -852,8 +872,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/api/generation/jobs", status_code=202)
     def create_generation_job(payload: GenerateRequest) -> dict[str, Any]:
-        if not re.fullmatch(r"gpt-image-[A-Za-z0-9._-]+", payload.model):
-            raise HTTPException(status_code=400, detail="模型名称必须是 gpt-image-*。")
+        model_name = payload.model.strip()
+        if not model_name or not re.fullmatch(r"[A-Za-z0-9._/-]+", model_name):
+            raise HTTPException(status_code=400, detail="模型名称格式无效，仅允许字母、数字、点、减号、下划线及斜杠。")
         size_normalized = payload.size.strip().lower()
         if (
             size_normalized != "auto"
@@ -897,7 +918,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider_url_snapshot=public_url(provider.base_url),
                 endpoint_override=endpoint or None,
                 reference_asset_id=reference_asset.id if reference_asset else None,
-                model=payload.model,
+                model=model_name,
                 prompt=payload.prompt.strip(),
                 size=size_normalized,
                 quality=payload.quality,

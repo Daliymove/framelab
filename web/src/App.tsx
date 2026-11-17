@@ -429,6 +429,7 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
   const [editBaseUrl, setEditBaseUrl] = useState("");
   const [editApiKey, setEditApiKey] = useState("");
+  const [editDefaultModel, setEditDefaultModel] = useState(config?.default_model || "gpt-image-2.6");
   const [showApiKey, setShowApiKey] = useState(false);
 
   const saveMediaDir = useMutation({
@@ -442,7 +443,7 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
   });
 
   const saveProviderMutation = useMutation({
-    mutationFn: ({ id, data }: { id: string; data: { base_url?: string; api_key?: string } }) =>
+    mutationFn: ({ id, data }: { id: string; data: { base_url?: string; api_key?: string; default_model?: string } }) =>
       updateProvider(id, data),
     onSuccess: (updated) => {
       setNotice(`Provider「${updated.name}」配置已更新并立即生效`);
@@ -460,6 +461,7 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
     setEditingProviderId(provider.id);
     setEditBaseUrl(provider.base_url || "");
     setEditApiKey("");
+    setEditDefaultModel(provider.default_model || config?.default_model || "gpt-image-2.6");
     setShowApiKey(false);
   };
 
@@ -467,6 +469,7 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
     setEditingProviderId(null);
     setEditBaseUrl("");
     setEditApiKey("");
+    setEditDefaultModel(config?.default_model || "gpt-image-2.6");
   };
 
   useEffect(() => {
@@ -537,6 +540,16 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
                         />
                       </label>
                       <label className="input-label">
+                        默认模型
+                        <input
+                          value={editDefaultModel}
+                          onChange={(e) => setEditDefaultModel(e.target.value)}
+                          placeholder="例如 gpt-image-2.6"
+                          className="mono"
+                          spellCheck={false}
+                        />
+                      </label>
+                      <label className="input-label">
                         API Key
                         <div className="provider-key-field">
                           <Key size={14} className="key-icon" />
@@ -579,6 +592,7 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
                             data: {
                               base_url: editBaseUrl.trim(),
                               ...(editApiKey.trim() ? { api_key: editApiKey.trim() } : {}),
+                              ...(editDefaultModel.trim() ? { default_model: editDefaultModel.trim() } : {}),
                             },
                           })}
                           disabled={saveProviderMutation.isPending}
@@ -986,7 +1000,24 @@ function GenerateView({
   setNotice: (value: string) => void;
 }) {
   const [prompt, setPrompt] = useGenerateDraftState("prompt", DEFAULT_GENERATE_PROMPT);
-  const [model, setModel] = useGenerateDraftState("model", "gpt-image-2");
+  const defaultModel = config?.default_model || "gpt-image-2.6";
+  const [model, setModel] = useGenerateDraftState("model", "gpt-image-2.6");
+  const availableModels = useMemo(() => {
+    const list = config?.available_models && config.available_models.length > 0
+      ? config.available_models
+      : ["gpt-image-2.6", "gpt-image-2.5", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"];
+    return list;
+  }, [config?.available_models]);
+  useEffect(() => {
+    if (config?.default_model) {
+      const stored = sessionStorage.getItem("framelab.generate.model");
+      if (stored === null || stored === '"gpt-image-2"') {
+        setModel(config.default_model);
+      }
+    }
+  }, [config?.default_model, setModel]);
+  const isPresetModel = availableModels.some((m) => m.toLowerCase() === model.trim().toLowerCase());
+  const [showCustomModel, setShowCustomModel] = useState(!isPresetModel && model.trim() !== "");
   const [size, setSize] = useGenerateDraftState("size", "auto");
   const isPresetSize = ASPECT_RATIO_PRESETS.some((p) => p.value.toLowerCase() === size.trim().toLowerCase());
   const [showCustomSize, setShowCustomSize] = useState(!isPresetSize && size.trim() !== "");
@@ -1077,7 +1108,8 @@ function GenerateView({
   const resetRequestDefaults = () => {
     setProviderId("");
     setEndpoint("");
-    setModel("gpt-image-2");
+    setModel(config?.default_model || "gpt-image-2.6");
+    setShowCustomModel(false);
     setSize("auto");
     setShowCustomSize(false);
     setQuality("high");
@@ -1113,6 +1145,7 @@ function GenerateView({
   const submit = (event: React.FormEvent) => {
     event.preventDefault();
     if (!prompt.trim()) return;
+    if (!model.trim()) { setNotice("请输入或选择模型名称"); return; }
     if (referenceUpload.isPending) { setNotice("参考图仍在上传，请稍候"); return; }
     if (timeout < 30 || timeout > 1800) { setNotice("最长等待必须在 30 到 1800 秒之间"); return; }
     if (endpointError(displayedEndpoint)) { setNotice(endpointError(displayedEndpoint)); return; }
@@ -1174,15 +1207,66 @@ function GenerateView({
           <label className="input-label">Provider<select value={providerId} onChange={(event) => setProviderId(event.target.value)}>{providers.map((provider) => <option value={provider.id} key={provider.id}>{provider.name}{provider.ready ? " · ready" : " · 未配置"}</option>)}</select></label>
           <label className="input-label">调用地址<div className="endpoint-field"><b>POST</b><input value={displayedEndpoint} onChange={(event) => setEndpoint(event.target.value)} placeholder="Provider 未配置 async 地址" spellCheck={false} /></div></label>
           <p className="field-help">默认显示当前模式的 async 地址；手动修改后只覆盖本次任务。</p>
-          <label className="input-label">
-            模型
-            <select value={model} onChange={(event) => setModel(event.target.value)}>
-              <option value="gpt-image-2">gpt-image-2</option>
-              <option value="gpt-image-2.5">gpt-image-2.5</option>
-              <option value="gpt-image-2-2k">gpt-image-2-2k</option>
-              <option value="gpt-image-2-4k">gpt-image-2-4k</option>
-            </select>
-          </label>
+          <div className="model-selection-group">
+            <div className="model-header-row">
+              <span className="field-legend">模型</span>
+              <button
+                type="button"
+                className="custom-model-toggle"
+                onClick={() => setShowCustomModel((prev) => !prev)}
+              >
+                {showCustomModel ? "选择预设" : "自定义模型"}
+              </button>
+            </div>
+            {!showCustomModel ? (
+              <label className="input-label" style={{ margin: 0 }}>
+                <select
+                  value={isPresetModel ? model : "__custom__"}
+                  onChange={(event) => {
+                    if (event.target.value === "__custom__") {
+                      setShowCustomModel(true);
+                    } else {
+                      setModel(event.target.value);
+                    }
+                  }}
+                >
+                  {availableModels.map((item) => (
+                    <option value={item} key={item}>
+                      {item}
+                      {item === defaultModel ? " (默认)" : item === "gpt-image-2.6" ? " (最新)" : ""}
+                    </option>
+                  ))}
+                  {!isPresetModel && model ? (
+                    <option value="__custom__">{`自定义: ${model}`}</option>
+                  ) : (
+                    <option value="__custom__">其他自定义模型...</option>
+                  )}
+                </select>
+              </label>
+            ) : (
+              <div className="custom-model-row">
+                <input
+                  type="text"
+                  value={model}
+                  onChange={(event) => setModel(event.target.value)}
+                  placeholder="例如 gpt-image-2.6"
+                  spellCheck={false}
+                />
+                {model !== defaultModel ? (
+                  <button
+                    type="button"
+                    className="text-button"
+                    onClick={() => {
+                      setModel(defaultModel);
+                      setShowCustomModel(false);
+                    }}
+                  >
+                    重置
+                  </button>
+                ) : null}
+              </div>
+            )}
+          </div>
           <fieldset className="aspect-ratio-fieldset">
             <div className="aspect-ratio-legend-row">
               <legend>画幅比例</legend>

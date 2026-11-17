@@ -1918,6 +1918,62 @@ p {
   border-color: var(--color-signal-primary);
 }
 
+.model-selection-group {
+  margin: 0;
+}
+
+.model-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+
+.model-header-row .field-legend {
+  color: var(--color-ink-primary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.custom-model-toggle {
+  font-size: 11px;
+  color: var(--color-ink-faint);
+  background: transparent;
+  border: 0;
+  padding: 2px 4px;
+  cursor: pointer;
+  transition: color var(--duration-fast);
+}
+
+.custom-model-toggle:hover {
+  color: var(--color-ink-primary);
+}
+
+.custom-model-row {
+  margin-top: 4px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.custom-model-row input {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--color-line-strong);
+  border-radius: var(--radius-small);
+  background: var(--color-surface);
+  color: var(--color-ink-primary);
+  font-family: var(--font-metadata);
+  font-size: 12px;
+  outline: none;
+}
+
+.custom-model-row input:focus {
+  border-color: var(--color-signal-primary);
+}
+
+
 .quality-options {
   margin: 18px 0 0;
   border: 0;

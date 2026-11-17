@@ -109,6 +109,8 @@ export interface Config {
   provider_count: number;
   provider_ready: boolean;
   provider: { id: string; name: string; base_url: string };
+  default_model?: string;
+  available_models?: string[];
   imgbed: { enabled: boolean; configured: boolean; base_url: string };
   data_dir: string;
   media_dir: string;
@@ -135,6 +137,7 @@ export interface Provider {
   api_key_env: string;
   enabled: boolean;
   ready: boolean;
+  default_model?: string;
 }
 
 export interface Tag {

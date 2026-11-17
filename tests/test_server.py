@@ -910,3 +910,90 @@ def test_generation_job_size_validation():
                 )
                 assert resp.status_code == 400, f"Expected 400 for size {s}"
 
+
+
+def test_config_and_generation_with_gpt_image_2_6_and_custom_models():
+    with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+        os.environ,
+        {
+            "FRAMELAB_DATA_DIR": temporary,
+            "CODEX_IMAGE_API_KEY": "test-key",
+            "CODEX_IMAGE_BASE_URL": "http://127.0.0.1:9/v1",
+            "CODEX_IMAGE_DEFAULT_MODEL": "gpt-image-2.6",
+            "FRAMELAB_IMGBED_ENABLED": "false",
+        },
+        clear=False,
+    ):
+        settings = Settings.from_env()
+        assert settings.image_model == "gpt-image-2.6"
+        assert "gpt-image-2.6" in settings.image_available_models
+
+        with TestClient(create_app(settings)) as client:
+            config_resp = client.get("/api/config")
+            assert config_resp.status_code == 200
+            data = config_resp.json()
+            assert data["default_model"] == "gpt-image-2.6"
+            assert "gpt-image-2.6" in data["available_models"]
+
+            # Submitting gpt-image-2.6
+            resp = client.post(
+                "/api/generation/jobs",
+                json={
+                    "prompt": "最新模型测试",
+                    "model": "gpt-image-2.6",
+                    "size": "auto",
+                    "quality": "high",
+                    "sync_enabled": False,
+                },
+            )
+            assert resp.status_code == 202
+            assert resp.json()["model"] == "gpt-image-2.6"
+
+            # Submitting a custom model
+            resp_custom = client.post(
+                "/api/generation/jobs",
+                json={
+                    "prompt": "自定义模型测试",
+                    "model": "custom-flux-v2",
+                    "size": "auto",
+                    "quality": "high",
+                    "sync_enabled": False,
+                },
+            )
+            assert resp_custom.status_code == 202
+            assert resp_custom.json()["model"] == "custom-flux-v2"
+
+            # Submitting an invalid model name with invalid characters
+            resp_invalid = client.post(
+                "/api/generation/jobs",
+                json={
+                    "prompt": "无效模型测试",
+                    "model": "invalid model with spaces!",
+                    "size": "auto",
+                    "quality": "high",
+                    "sync_enabled": False,
+                },
+            )
+            assert resp_invalid.status_code == 400
+
+
+def test_update_provider_default_model():
+    with tempfile.TemporaryDirectory() as temporary, mock.patch.dict(
+        os.environ,
+        {
+            "FRAMELAB_DATA_DIR": temporary,
+            "CODEX_IMAGE_API_KEY": "test-key",
+            "CODEX_IMAGE_BASE_URL": "http://127.0.0.1:9/v1",
+            "FRAMELAB_IMGBED_ENABLED": "false",
+        },
+        clear=False,
+    ):
+        settings = Settings.from_env()
+        with TestClient(create_app(settings)) as client:
+            resp = client.patch(
+                f"/api/providers/{settings.image_provider_id}",
+                json={"default_model": "gpt-image-2.6"},
+            )
+            assert resp.status_code == 200
+            assert resp.json()["default_model"] == "gpt-image-2.6"
+            assert os.environ.get("CODEX_IMAGE_DEFAULT_MODEL") == "gpt-image-2.6"
