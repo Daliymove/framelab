@@ -923,7 +923,7 @@ def test_config_and_generation_with_gpt_image_2_6_and_custom_models():
             "FRAMELAB_IMGBED_ENABLED": "false",
         },
         clear=False,
-    ):
+    ), mock.patch("framelab.api.reload_env"):
         settings = Settings.from_env()
         assert settings.image_model == "gpt-image-2.6"
         assert "gpt-image-2.6" in settings.image_available_models
@@ -987,7 +987,7 @@ def test_update_provider_default_model():
             "FRAMELAB_IMGBED_ENABLED": "false",
         },
         clear=False,
-    ):
+    ), mock.patch("framelab.api.persist_provider_config"), mock.patch("framelab.api.reload_env"):
         settings = Settings.from_env()
         with TestClient(create_app(settings)) as client:
             resp = client.patch(

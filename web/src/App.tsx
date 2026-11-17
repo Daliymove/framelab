@@ -544,7 +544,7 @@ function SettingsDrawer({ config, providers, onClose, setNotice }: { config?: Co
                         <input
                           value={editDefaultModel}
                           onChange={(e) => setEditDefaultModel(e.target.value)}
-                          placeholder="例如 gpt-image-2.6"
+                          placeholder="例如 gpt-image-3 或 gpt-image-2.6"
                           className="mono"
                           spellCheck={false}
                         />
@@ -1005,19 +1005,34 @@ function GenerateView({
   const availableModels = useMemo(() => {
     const list = config?.available_models && config.available_models.length > 0
       ? config.available_models
-      : ["gpt-image-2.6", "gpt-image-2.5", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"];
+      : [defaultModel];
     return list;
-  }, [config?.available_models]);
+  }, [config?.available_models, defaultModel]);
   useEffect(() => {
     if (config?.default_model) {
       const stored = sessionStorage.getItem("framelab.generate.model");
-      if (stored === null || stored === '"gpt-image-2"') {
+      let storedModel = "";
+      try {
+        storedModel = stored ? JSON.parse(stored) : "";
+      } catch {
+        storedModel = "";
+      }
+      const lastDefault = sessionStorage.getItem("framelab.generate.last_default_model");
+      const isLegacy = /^(gpt-image-2(\.5|-2k|-4k)?)$/.test(storedModel);
+      const isTrackingDefault = !storedModel || storedModel === lastDefault || isLegacy;
+      if (isTrackingDefault) {
         setModel(config.default_model);
       }
+      sessionStorage.setItem("framelab.generate.last_default_model", config.default_model);
     }
   }, [config?.default_model, setModel]);
   const isPresetModel = availableModels.some((m) => m.toLowerCase() === model.trim().toLowerCase());
   const [showCustomModel, setShowCustomModel] = useState(!isPresetModel && model.trim() !== "");
+  useEffect(() => {
+    if (!showCustomModel && !isPresetModel && defaultModel) {
+      setModel(defaultModel);
+    }
+  }, [showCustomModel, isPresetModel, defaultModel, setModel]);
   const [size, setSize] = useGenerateDraftState("size", "auto");
   const isPresetSize = ASPECT_RATIO_PRESETS.some((p) => p.value.toLowerCase() === size.trim().toLowerCase());
   const [showCustomSize, setShowCustomSize] = useState(!isPresetSize && size.trim() !== "");
@@ -1213,7 +1228,13 @@ function GenerateView({
               <button
                 type="button"
                 className="custom-model-toggle"
-                onClick={() => setShowCustomModel((prev) => !prev)}
+                onClick={() => {
+                  const next = !showCustomModel;
+                  setShowCustomModel(next);
+                  if (!next && !availableModels.some((m) => m.toLowerCase() === model.trim().toLowerCase())) {
+                    setModel(defaultModel);
+                  }
+                }}
               >
                 {showCustomModel ? "选择预设" : "自定义模型"}
               </button>
@@ -1236,11 +1257,7 @@ function GenerateView({
                       {item === defaultModel ? " (默认)" : item === "gpt-image-2.6" ? " (最新)" : ""}
                     </option>
                   ))}
-                  {!isPresetModel && model ? (
-                    <option value="__custom__">{`自定义: ${model}`}</option>
-                  ) : (
-                    <option value="__custom__">其他自定义模型...</option>
-                  )}
+                  <option value="__custom__">其他自定义模型...</option>
                 </select>
               </label>
             ) : (

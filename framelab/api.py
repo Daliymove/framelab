@@ -454,12 +454,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def config() -> dict[str, Any]:
         nonlocal settings
         reload_env()
-        settings = replace(
-            settings,
-            image_api_key=os.environ.get("CODEX_IMAGE_API_KEY", settings.image_api_key),
-            image_base_url=os.environ.get("CODEX_IMAGE_BASE_URL", settings.image_base_url),
-            image_model=os.environ.get("CODEX_IMAGE_DEFAULT_MODEL", settings.image_model),
-        )
+        settings = Settings.from_env()
         app.state.settings = settings
         with session_factory() as session:
             provider_count = session.scalar(select(func.count()).select_from(Provider)) or 0
@@ -630,17 +625,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 raise HTTPException(status_code=500, detail=f"无法保存 provider 配置到 .env：{exc}") from exc
 
             if row.id == settings.image_provider_id:
-                new_base_url = clean_url if clean_url is not None else settings.image_base_url
-                new_key = clean_key if clean_key is not None else settings.image_api_key
-                new_name = row.name
-                new_model = clean_model if clean_model is not None else settings.image_model
-                settings = replace(
-                    settings,
-                    image_base_url=new_base_url,
-                    image_api_key=new_key,
-                    image_provider_name=new_name,
-                    image_model=new_model,
-                )
+                reload_env()
+                settings = Settings.from_env()
                 app.state.settings = settings
 
             return {

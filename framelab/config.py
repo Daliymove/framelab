@@ -101,10 +101,6 @@ def persist_provider_config(
 
 DEFAULT_AVAILABLE_MODELS: tuple[str, ...] = (
     "gpt-image-2.6",
-    "gpt-image-2.5",
-    "gpt-image-2",
-    "gpt-image-2-2k",
-    "gpt-image-2-4k",
 )
 
 
